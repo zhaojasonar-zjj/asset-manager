@@ -272,39 +272,70 @@ class Database:
             return [r["broker"] for r in rows]
 
     def get_cash_balance(self) -> float:
-        """从资金流水中获取最新余额；若无，从交割单结算金额推算"""
+        """获取最新现金余额
+
+        优先级：
+        1. 资金流水表中最新的 balance 字段
+        2. 从资金流水 amount 字段累加
+        3. 从交割单 settlement 字段推算（初始 0 + 累计结算金额）
+        """
         with self.get_connection() as conn:
+            # 优先：资金流水中的最新余额
             row = conn.execute(
                 "SELECT balance FROM fund_flows WHERE balance IS NOT NULL "
                 "ORDER BY flow_date DESC, id DESC LIMIT 1"
             ).fetchone()
-            if row:
+            if row and row["balance"] is not None:
                 return row["balance"]
+
+            # 其次：资金流水 amount 累加
+            row = conn.execute(
+                "SELECT COALESCE(SUM(amount), 0) AS v FROM fund_flows"
+            ).fetchone()
+            if row and row["v"] != 0:
+                return row["v"]
+
+            # 最后：从交割单推算（0 + 累计结算金额，买入为负卖出为正）
             row = conn.execute(
                 "SELECT COALESCE(SUM(settlement), 0) AS v FROM transactions"
             ).fetchone()
             return row["v"]
 
     def get_total_deposits(self) -> float:
-        """累计净转入资金（银行转入 - 银行转出）"""
+        """累计净转入资金（银行转入 - 银行转出）
+
+        匹配关键词更宽松，覆盖各券商不同写法。
+        """
         with self.get_connection() as conn:
+            # 银行转入类
             row = conn.execute(
                 """SELECT COALESCE(SUM(amount), 0) AS v FROM fund_flows
-                   WHERE flow_type LIKE '%银行转证券%'
-                      OR flow_type LIKE '%银行转入%'
-                      OR flow_type LIKE '%资金转入%'
-                      OR flow_type LIKE '%银证转入%'"""
+                   WHERE flow_type LIKE '%银行%转%证券%'
+                      OR flow_type LIKE '%银行%转%%'
+                      OR flow_type LIKE '%银证%转入%'
+                      OR flow_type LIKE '%银证转%'
+                      OR flow_type LIKE '%存管%转入%'
+                      OR flow_type LIKE '%资金%转入%'
+                      OR flow_type LIKE '%转入%'
+                      OR flow_type LIKE '%入金%'"""
             ).fetchone()
-            deposits = row["v"]
+            deposits = row["v"] if row["v"] > 0 else 0
+
+            # 银行转出类
             row = conn.execute(
                 """SELECT COALESCE(SUM(amount), 0) AS v FROM fund_flows
-                   WHERE flow_type LIKE '%证券转银行%'
-                      OR flow_type LIKE '%银行转出%'
-                      OR flow_type LIKE '%资金转出%'
-                      OR flow_type LIKE '%银证转出%'"""
+                   WHERE flow_type LIKE '%证券%转%银行%'
+                      OR flow_type LIKE '%银行%转出%'
+                      OR flow_type LIKE '%银证%转出%'
+                      OR flow_type LIKE '%银证转出%'
+                      OR flow_type LIKE '%存管%转出%'
+                      OR flow_type LIKE '%资金%转出%'
+                      OR flow_type LIKE '%转出%'
+                      OR flow_type LIKE '%出金%'"""
             ).fetchone()
-            withdrawals = row["v"]
-            return deposits + withdrawals
+            withdrawals = abs(row["v"]) if row["v"] < 0 else 0
+
+            return deposits - withdrawals
 
     def get_transaction_count(self) -> int:
         with self.get_connection() as conn:
