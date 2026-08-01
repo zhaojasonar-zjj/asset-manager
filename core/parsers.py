@@ -39,9 +39,19 @@ FUND_FLOW_COL_MAP = {
 
 # ── 工具函数 ──────────────────────────────────────────────
 
-def _normalize_header(h: str) -> str:
-    """去除表头中的空格、换行等"""
-    return str(h).strip().replace(" ", "").replace("\n", "").replace("\r", "")
+def _normalize_header(h) -> str:
+    """去除表头中的空格、换行等，确保返回字符串"""
+    if h is None:
+        return ""
+    try:
+        if pd.isna(h):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(h).strip().replace(" ", "").replace("\n", "").replace("\r", "")
+    if s.lower() in ("nan", "none", "nat", ""):
+        return ""
+    return s
 
 
 def _find_header_row(df: pd.DataFrame, max_rows: int = 15) -> int:
@@ -52,7 +62,10 @@ def _find_header_row(df: pd.DataFrame, max_rows: int = 15) -> int:
     ]
     best_row, best_score = 0, 0
     for i in range(min(max_rows, len(df))):
-        row_values = df.iloc[i].astype(str).tolist()
+        try:
+            row_values = [str(v).strip() for v in df.iloc[i].tolist()]
+        except Exception:
+            continue
         score = sum(1 for v in row_values if any(kw in v for kw in keywords))
         if score > best_score:
             best_score = score
@@ -60,18 +73,25 @@ def _find_header_row(df: pd.DataFrame, max_rows: int = 15) -> int:
     return best_row
 
 
-def _match_columns(headers: list[str], col_map: dict) -> dict:
+def _match_columns(headers: list, col_map: dict) -> dict:
     """将 Excel 列名匹配到标准字段名"""
     normalized = [_normalize_header(h) for h in headers]
     mapping = {}
     for standard_name, synonyms in col_map.items():
         for syn in synonyms:
             syn_clean = _normalize_header(syn)
+            if not syn_clean:
+                continue
             for i, h in enumerate(normalized):
-                if h == syn_clean or syn_clean in h:
-                    if i not in mapping.values():
-                        mapping[standard_name] = i
-                        break
+                if not h:
+                    continue
+                try:
+                    if h == syn_clean or syn_clean in h:
+                        if i not in mapping.values():
+                            mapping[standard_name] = i
+                            break
+                except TypeError:
+                    continue
             if standard_name in mapping:
                 break
     return mapping
@@ -113,11 +133,18 @@ def _parse_date(val) -> str:
 
 def _to_float(val) -> float:
     """安全转浮点数"""
-    if pd.isna(val):
+    if val is None:
         return 0.0
+    try:
+        if pd.isna(val):
+            return 0.0
+    except (TypeError, ValueError):
+        pass
     if isinstance(val, (int, float)):
         return float(val)
-    s = str(val).strip().replace(",", "").replace("，", "")
+    s = str(val).strip().replace(",", "").replace("，", "").replace(" ", "")
+    if s in ("", "-", "nan", "NaN", "None", "null"):
+        return 0.0
     try:
         return float(s)
     except ValueError:
@@ -132,8 +159,8 @@ def detect_file_type(df: pd.DataFrame) -> str:
     tx_keywords = ["证券代码", "股票代码", "成交数量", "成交价格", "买卖"]
     ff_keywords = ["发生金额", "资金余额", "业务类型", "业务名称"]
 
-    tx_score = sum(1 for h in headers if any(kw in h for kw in tx_keywords))
-    ff_score = sum(1 for h in headers if any(kw in h for kw in ff_keywords))
+    tx_score = sum(1 for h in headers if h and any(kw in h for kw in tx_keywords))
+    ff_score = sum(1 for h in headers if h and any(kw in h for kw in ff_keywords))
 
     if tx_score >= 2 and tx_score >= ff_score:
         return "transactions"
@@ -176,17 +203,26 @@ def read_excel_robust(file_path: str | Path) -> list[tuple[str, pd.DataFrame]]:
     if file_path.suffix.lower() == ".csv":
         df = pd.read_csv(file_path, dtype=str)
         header_row = _find_header_row(df)
-        df.columns = df.iloc[header_row]
+        df.columns = [str(c) for c in df.iloc[header_row].tolist()]
         df = df.iloc[header_row + 1 :].reset_index(drop=True)
         df = df.dropna(how="all")
-        sheets.append(("csv", df))
+        if not df.empty:
+            sheets.append(("csv", df))
     elif file_path.suffix.lower() in (".xls", ".xlsx", ".xlsm"):
         xls = pd.ExcelFile(file_path)
         for sheet_name in xls.sheet_names:
             raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+            if raw.empty:
+                continue
             header_row = _find_header_row(raw)
-            # 始终将 header_row 设为列名，并跳过该行
-            raw.columns = raw.iloc[header_row]
+            # 设置列名：用 header_row 的值，NaN 列名用空字符串替代
+            new_cols = []
+            for c in raw.iloc[header_row].tolist():
+                col_name = _normalize_header(c)
+                if not col_name:
+                    col_name = f"col_{len(new_cols)}"
+                new_cols.append(col_name)
+            raw.columns = new_cols
             raw = raw.iloc[header_row + 1 :].reset_index(drop=True)
             raw = raw.dropna(how="all")
             if not raw.empty:
@@ -300,32 +336,42 @@ def parse_fund_flows(df: pd.DataFrame, broker: str = "通用") -> pd.DataFrame:
 
 def parse_excel_file(file_path: str | Path, broker: str = "通用") -> list[dict]:
     """解析 Excel 文件，返回 [{'file_type': ..., 'data': DataFrame, 'sheet': ...}]"""
+    import traceback
+
     sheets = read_excel_robust(file_path)
     results = []
 
     for sheet_name, df in sheets:
-        file_type = detect_file_type(df)
-        if file_type == "transactions":
-            parsed = parse_transactions(df, broker)
-            if not parsed.empty:
-                results.append({"file_type": "transactions", "data": parsed, "sheet": sheet_name})
-        elif file_type == "fund_flows":
-            parsed = parse_fund_flows(df, broker)
-            if not parsed.empty:
-                results.append({"file_type": "fund_flows", "data": parsed, "sheet": sheet_name})
-        else:
-            # 尝试两种解析
-            try:
-                parsed_tx = parse_transactions(df, broker)
-                if not parsed_tx.empty:
-                    results.append({"file_type": "transactions", "data": parsed_tx, "sheet": sheet_name})
-            except Exception:
-                pass
-            try:
-                parsed_ff = parse_fund_flows(df, broker)
-                if not parsed_ff.empty:
-                    results.append({"file_type": "fund_flows", "data": parsed_ff, "sheet": sheet_name})
-            except Exception:
-                pass
+        try:
+            file_type = detect_file_type(df)
+            if file_type == "transactions":
+                parsed = parse_transactions(df, broker)
+                if not parsed.empty:
+                    results.append({"file_type": "transactions", "data": parsed, "sheet": sheet_name})
+            elif file_type == "fund_flows":
+                parsed = parse_fund_flows(df, broker)
+                if not parsed.empty:
+                    results.append({"file_type": "fund_flows", "data": parsed, "sheet": sheet_name})
+            else:
+                # 尝试两种解析
+                try:
+                    parsed_tx = parse_transactions(df, broker)
+                    if not parsed_tx.empty:
+                        results.append({"file_type": "transactions", "data": parsed_tx, "sheet": sheet_name})
+                except Exception:
+                    pass
+                try:
+                    parsed_ff = parse_fund_flows(df, broker)
+                    if not parsed_ff.empty:
+                        results.append({"file_type": "fund_flows", "data": parsed_ff, "sheet": sheet_name})
+                except Exception:
+                    pass
+        except Exception as e:
+            # 附带详细错误信息，方便调试
+            raise type(e)(
+                f"[Sheet: {sheet_name}] {e}\n"
+                f"Columns: {df.columns.tolist()}\n"
+                f"Shape: {df.shape}"
+            ) from e
 
     return results

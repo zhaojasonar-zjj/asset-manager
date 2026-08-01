@@ -59,13 +59,16 @@ if uploaded_files:
         try:
             results = parse_excel_file(tmp_path, broker)
             if not results:
-                errors.append(f"⚠️ **{uploaded_file.name}**：未识别出有效数据")
+                errors.append(f"⚠️ **{uploaded_file.name}**：未识别出有效数据，请检查文件格式。"
+                              f"\n\n提示：确保 Excel 包含「证券代码」「成交日期」「成交数量」等列名。")
             else:
                 for r in results:
                     r["filename"] = uploaded_file.name
                     all_parsed.append(r)
         except Exception as e:
-            errors.append(f"❌ **{uploaded_file.name}**：{str(e)}")
+            import traceback
+            tb = traceback.format_exc()
+            errors.append(f"❌ **{uploaded_file.name}**：{str(e)}\n\n```\n{tb}\n```")
 
     # 显示错误
     for err in errors:
