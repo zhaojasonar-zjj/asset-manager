@@ -34,6 +34,10 @@ def recalculate_holdings(transactions: pd.DataFrame) -> list[dict]:
 
         qty = float(tx["quantity"])
         settlement = abs(float(tx.get("settlement", 0)))
+        # 如果 settlement 为 0，用 amount + fees 代替
+        if settlement == 0:
+            settlement = abs(float(tx.get("amount", 0))) + abs(float(tx.get("commission", 0))) + \
+                         abs(float(tx.get("stamp_tax", 0))) + abs(float(tx.get("transfer_fee", 0)))
         trade_type = str(tx.get("trade_type", ""))
 
         if "买" in trade_type:
@@ -59,19 +63,25 @@ def recalculate_holdings(transactions: pd.DataFrame) -> list[dict]:
     return result
 
 
-def calculate_market_value(holdings: pd.DataFrame, prices: dict) -> tuple[float, float, list[dict]]:
+def calculate_market_value(holdings: pd.DataFrame, prices: dict) -> tuple[float, float, list[dict], bool]:
     """计算持仓市值
 
-    返回: (total_market_value, total_pnl, enriched_holdings)
+    返回: (total_market_value, total_pnl, enriched_holdings, all_prices_ok)
     """
     total_mv = 0.0
     total_pnl = 0.0
     enriched = []
+    all_prices_ok = True
 
     for _, row in holdings.iterrows():
         code = str(row["stock_code"]).strip().zfill(6)
         price_info = prices.get(code, {})
         current_price = price_info.get("price", 0)
+
+        # 如果实时价格为 0（接口失败），用成本价做 fallback
+        if current_price <= 0:
+            current_price = float(row.get("cost_price", 0))
+            all_prices_ok = False
 
         quantity = float(row["quantity"])
         cost_price = float(row["cost_price"])
@@ -98,10 +108,11 @@ def calculate_market_value(holdings: pd.DataFrame, prices: dict) -> tuple[float,
                 "pnl_pct": round(pnl_pct, 2),
                 "today_change": today_change,
                 "prev_close": price_info.get("prev_close", 0),
+                "price_source": "实时" if price_info.get("price", 0) > 0 else "成本价",
             }
         )
 
-    return round(total_mv, 2), round(total_pnl, 2), enriched
+    return round(total_mv, 2), round(total_pnl, 2), enriched, all_prices_ok
 
 
 def get_current_holdings_codes(db: Database) -> list[str]:
@@ -128,7 +139,7 @@ def take_daily_snapshot(db: Database, prices: dict | None = None) -> dict | None
         if prices is None:
             codes = holdings["stock_code"].unique().tolist()
             prices = fetch_realtime_prices(codes)
-        _, market_value, _ = calculate_market_value(holdings, prices)
+        market_value, _, _, _ = calculate_market_value(holdings, prices)
 
     total_assets = cash + market_value
     deposits = db.get_total_deposits()

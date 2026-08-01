@@ -25,7 +25,10 @@ codes = holdings["stock_code"].unique().tolist()
 with st.spinner("正在获取实时行情..."):
     prices = fetch_realtime_prices(codes)
 
-market_value, total_pnl, enriched = calculate_market_value(holdings, prices)
+market_value, total_pnl, enriched, prices_ok = calculate_market_value(holdings, prices)
+
+if not prices_ok:
+    st.warning("⚠️ 部分股票实时行情获取失败，最新价使用成本价估算。")
 
 # ── 汇总卡片 ────────────────────────────────────────────
 st.markdown("### 💰 持仓概览")

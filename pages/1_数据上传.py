@@ -59,8 +59,16 @@ if uploaded_files:
         try:
             results = parse_excel_file(tmp_path, broker)
             if not results:
-                errors.append(f"⚠️ **{uploaded_file.name}**：未识别出有效数据，请检查文件格式。"
-                              f"\n\n提示：确保 Excel 包含「证券代码」「成交日期」「成交数量」等列名。")
+                # 解析失败时显示原始数据帮助诊断
+                sheets = read_excel_robust(tmp_path)
+                diag_msg = f"⚠️ **{uploaded_file.name}**：未识别出有效数据。\n\n"
+                for sheet_name, df in sheets:
+                    ft = detect_file_type(df)
+                    diag_msg += f"**工作表**: {sheet_name} | **识别类型**: {ft} | **行数**: {len(df)}\n"
+                    diag_msg += f"**列名**: {df.columns.tolist()}\n\n"
+                    diag_msg += "**前 5 行数据**:\n\n"
+                    diag_msg += df.head().to_string() + "\n\n---\n\n"
+                errors.append(diag_msg)
             else:
                 for r in results:
                     r["filename"] = uploaded_file.name
@@ -68,7 +76,16 @@ if uploaded_files:
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
-            errors.append(f"❌ **{uploaded_file.name}**：{str(e)}\n\n```\n{tb}\n```")
+            # 同时显示原始列名帮助调试
+            try:
+                sheets = read_excel_robust(tmp_path)
+                cols_info = ""
+                for sheet_name, df in sheets:
+                    cols_info += f"\n\n**工作表 {sheet_name} 列名**: {df.columns.tolist()}"
+                    cols_info += f"\n**前 3 行**:\n{df.head(3).to_string()}"
+            except Exception:
+                cols_info = ""
+            errors.append(f"❌ **{uploaded_file.name}**：{str(e)}\n\n```\n{tb}\n```{cols_info}")
 
     # 显示错误
     for err in errors:
