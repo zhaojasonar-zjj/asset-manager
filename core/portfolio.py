@@ -8,7 +8,7 @@ import numpy as np
 from datetime import datetime, timedelta
 
 from .database import Database
-from .price_fetcher import fetch_realtime_prices, fetch_history_close_prices
+from .price_fetcher import fetch_realtime_prices, fetch_history_close_prices, fetch_history_kline
 
 
 def recalculate_holdings(transactions: pd.DataFrame) -> list[dict]:
@@ -138,30 +138,107 @@ def take_daily_snapshot(db: Database, account_id: int):
 def build_asset_history(db: Database, account_id: int) -> pd.DataFrame:
     """构建历史资产曲线
 
-    数据来源优先级：
-    1. daily_assets 表中的历史快照
-    2. 从资金流水 + 交易记录推算
+    策略：从资金流水取每日现金余额，从交割单重建每日持仓，
+    再用历史收盘价计算每日市值。
     """
     # 先取已有快照
     snapshots = db.get_daily_assets(account_id)
-
     if not snapshots.empty:
         return snapshots
 
-    # 没有快照，从资金流水推算
+    # 没有快照，从数据推算
     fund_flows = db.get_fund_flows(account_id)
-    if fund_flows.empty:
+    transactions = db.get_transactions(account_id)
+
+    if fund_flows.empty and transactions.empty:
         return pd.DataFrame()
 
-    # 按日期聚合每日余额
-    ff = fund_flows.copy()
-    ff["flow_date"] = ff["flow_date"].astype(str)
-    daily = ff.groupby("flow_date").agg(
-        cash_balance=("balance", "last"),
-    ).reset_index().sort_values("flow_date")
+    # ── 1. 每日现金余额（来自资金流水）──────────────────────
+    if not fund_flows.empty:
+        ff = fund_flows.copy()
+        ff["flow_date"] = ff["flow_date"].astype(str)
+        daily_cash = ff.groupby("flow_date").agg(
+            cash_balance=("balance", "last"),
+        ).reset_index().sort_values("flow_date")
+    else:
+        # 没有资金明细，现金余额从交割单 settlement 推算
+        tx = transactions.copy()
+        tx["trade_date"] = tx["trade_date"].astype(str)
+        daily_cash = tx.groupby("trade_date").agg(
+            cash_balance=("settlement", "sum"),
+        ).reset_index().sort_values("trade_date")
+        # settlement 是累计的，需要 cumsum
+        daily_cash["cash_balance"] = daily_cash["cash_balance"].cumsum()
 
-    daily = daily.rename(columns={"flow_date": "date"})
-    daily["market_value"] = 0.0
+    # 确保列名为 date
+    date_col = [c for c in daily_cash.columns if c != "cash_balance"][0]
+    daily_cash = daily_cash.rename(columns={date_col: "date"})
+
+    # ── 2. 重建每日持仓 ─────────────────────────────────────
+    # 按日期排序交易记录，逐日累加持仓
+    if not transactions.empty:
+        tx = transactions[transactions["trade_type"].isin(["买入", "卖出"])].copy()
+        tx["trade_date"] = tx["trade_date"].astype(str)
+        tx = tx.sort_values("trade_date").reset_index(drop=True)
+
+        # 收集所有交易日期
+        all_dates = sorted(set(daily_cash["date"].tolist()) | set(tx["trade_date"].tolist()))
+
+        # 逐日持仓快照
+        daily_holdings: dict[str, dict[str, float]] = {}  # {date: {code: quantity}}
+        current_h: dict[str, float] = {}
+
+        for d in all_dates:
+            day_tx = tx[tx["trade_date"] == d]
+            for _, row in day_tx.iterrows():
+                code = str(row["stock_code"]).strip().zfill(6)
+                qty = float(row["quantity"])
+                if code not in current_h:
+                    current_h[code] = 0.0
+                if row["trade_type"] == "买入":
+                    current_h[code] += qty
+                elif row["trade_type"] == "卖出":
+                    current_h[code] -= qty
+            # 记录当日持仓快照（只保留 >0 的）
+            daily_holdings[d] = {c: q for c, q in current_h.items() if q > 0.01}
+    else:
+        all_dates = daily_cash["date"].tolist()
+        daily_holdings = {d: {} for d in all_dates}
+
+    # ── 3. 获取历史收盘价，计算每日市值 ────────────────────
+    # 收集所有需要的股票代码
+    all_codes = set()
+    for holdings in daily_holdings.values():
+        all_codes.update(holdings.keys())
+
+    # 获取每只股票的历史收盘价
+    code_price_map: dict[str, dict[str, float]] = {}  # {code: {date: close_price}}
+    if all_codes and all_dates:
+        for code in all_codes:
+            kline = fetch_history_kline(code, min(all_dates).replace("-", ""), max(all_dates).replace("-", ""), 400)
+            code_price_map[code] = {item["date"]: item["close"] for item in kline}
+
+    # 计算每日市值
+    daily_market_values = []
+    for d in all_dates:
+        mv = 0.0
+        for code, qty in daily_holdings.get(d, {}).items():
+            price = code_price_map.get(code, {}).get(d, 0)
+            mv += price * qty
+        daily_market_values.append({"date": d, "market_value": round(mv, 2)})
+
+    daily_mv_df = pd.DataFrame(daily_market_values)
+
+    # ── 4. 合并现金和市值 ──────────────────────────────────
+    if not daily_mv_df.empty:
+        daily = daily_cash.merge(daily_mv_df, on="date", how="outer").sort_values("date")
+    else:
+        daily = daily_cash.copy()
+        daily["market_value"] = 0.0
+
+    # 前向填充现金余额（非交易日保持上一日余额）
+    daily["cash_balance"] = daily["cash_balance"].ffill().fillna(0)
+    daily["market_value"] = daily["market_value"].fillna(0)
     daily["total_assets"] = daily["cash_balance"] + daily["market_value"]
 
     deposits = db.get_total_deposits(account_id)

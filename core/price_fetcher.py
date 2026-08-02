@@ -173,7 +173,14 @@ def fetch_history_kline(
     返回: [{"date": "YYYY-MM-DD", "open": float, "close": float, "high": float, "low": float, "volume": float}]
     """
     tencent_code = _to_tencent_code(stock_code)
-    url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={tencent_code},day,{start_date},{end_date},{count},{fq}"
+    # 腾讯接口要求日期格式为 YYYY-MM-DD（带横杠）
+    sd = start_date.replace("-", "") if start_date else ""
+    ed = end_date.replace("-", "") if end_date else ""
+    if sd:
+        sd = f"{sd[:4]}-{sd[4:6]}-{sd[6:8]}"
+    if ed:
+        ed = f"{ed[:4]}-{ed[4:6]}-{ed[6:8]}"
+    url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={tencent_code},day,{sd},{ed},{count},{fq}"
 
     try:
         resp = requests.get(url, timeout=15)
@@ -182,10 +189,17 @@ def fetch_history_kline(
         return []
 
     result = []
-    stock_data = data.get("data", {}).get(tencent_code, {})
-
+    # 腾讯接口返回格式可能为 {data: {code: {qfqday: [...]}}} 或 {code: {qfqday: [...]}}
+    stock_data = data.get("data", data) if isinstance(data, dict) else {}
+    if isinstance(stock_data, dict):
+        # 尝试多种 key
+        stock_data = stock_data.get(tencent_code, stock_data)
+    
     # 优先取 qfq（前复权）数据
-    kline = stock_data.get("qfqday") or stock_data.get("day") or []
+    if isinstance(stock_data, dict):
+        kline = stock_data.get("qfqday") or stock_data.get("day") or []
+    else:
+        kline = []
 
     for item in kline:
         if len(item) >= 6:
