@@ -109,6 +109,18 @@ st.markdown("### 📉 资产历史曲线")
 
 asset_history = build_asset_history(db, account_id)
 
+# 重建按钮
+col_btn, col_info = st.columns([1, 3])
+with col_btn:
+    if st.button("🔄 重建历史曲线", help="重新获取历史行情并计算每日资产"):
+        with st.spinner("正在重建，可能需要数十秒..."):
+            asset_history = build_asset_history(db, account_id, force_rebuild=True)
+        st.success(f"已重建：{len(asset_history)} 个交易日")
+        st.rerun()
+with col_info:
+    if not asset_history.empty:
+        st.caption(f"共 {len(asset_history)} 个交易日 ｜ {asset_history['date'].min()} ~ {asset_history['date'].max()}")
+
 if not asset_history.empty:
     chart_data = asset_history.copy()
     chart_data["date"] = chart_data["date"].astype(str)
@@ -118,7 +130,7 @@ if not asset_history.empty:
         fig.add_trace(go.Scatter(
             x=chart_data["date"], y=chart_data["total_assets"],
             name="总资产", line=dict(color="#2563eb", width=2),
-            mode="lines+markers",
+            mode="lines",
         ))
     if "cash_balance" in chart_data.columns:
         fig.add_trace(go.Scatter(
@@ -136,7 +148,7 @@ if not asset_history.empty:
         fig.add_trace(go.Scatter(
             x=chart_data["date"], y=chart_data["net_value"],
             name="净值", line=dict(color="#8b5cf6", width=2),
-            mode="lines+markers", yaxis="y2",
+            mode="lines", yaxis="y2",
         ))
 
     fig.update_layout(
@@ -150,21 +162,24 @@ if not asset_history.empty:
     )
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info("暂无资产历史数据")
+    st.info("暂无资产历史数据，请先上传数据")
 
 # ── 每日资产明细表 ──────────────────────────────────────
 st.markdown("---")
-st.markdown("### 📋 每日资产明细")
+st.markdown("### 📋 每日资产明细（按交易日）")
 
 if not asset_history.empty:
     display_history = asset_history.copy()
     display_history["date"] = display_history["date"].astype(str)
+    display_history = display_history.sort_values("date", ascending=False)
+    
+    # 格式化显示
     for col in ["cash_balance", "market_value", "total_assets"]:
         if col in display_history.columns:
             display_history[col] = display_history[col].apply(lambda x: f"¥ {x:,.2f}" if pd.notna(x) else "-")
     if "net_value" in display_history.columns:
         display_history["net_value"] = display_history["net_value"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
-    display_history = display_history.sort_values("date", ascending=False)
-    st.dataframe(display_history, use_container_width=True, hide_index=True)
+    
+    st.dataframe(display_history, use_container_width=True, hide_index=True, height=500)
 else:
     st.info("暂无每日资产记录")

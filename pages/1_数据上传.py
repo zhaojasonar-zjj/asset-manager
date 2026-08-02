@@ -7,7 +7,7 @@ import shutil
 
 from core.database import Database
 from core.parsers import parse_excel_file, detect_format, read_excel_robust
-from core.portfolio import recalculate_holdings
+from core.portfolio import recalculate_holdings, build_asset_history
 
 st.set_page_config(page_title="数据上传", page_icon="📁", layout="wide")
 
@@ -144,6 +144,15 @@ if uploaded_files and selected_account_id:
                     db.insert_fund_flows(data, account_id)
                     db.log_upload(account_id, fname, "资金明细", len(data))
                     st.success(f"✅ {fname}：{len(data)} 条资金流水已导入")
+
+            # 导入完成后自动构建历史资产快照
+            with st.spinner("正在构建历史资产曲线（获取历史行情，可能需要数十秒）..."):
+                try:
+                    history_df = build_asset_history(db, account_id, force_rebuild=True)
+                    if not history_df.empty:
+                        st.info(f"📈 历史资产曲线已构建：{len(history_df)} 个交易日")
+                except Exception as e:
+                    st.warning(f"历史资产曲线构建失败（不影响数据导入）: {e}")
 
             st.balloons()
 

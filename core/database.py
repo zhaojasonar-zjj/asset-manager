@@ -315,6 +315,21 @@ class Database:
                 (account_id, date_str, cash, market_value, total, net_value),
             )
 
+    def replace_daily_assets(self, account_id: int, records: list[dict]):
+        """批量替换每日资产快照（先删后插）"""
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM daily_assets WHERE account_id = ?", (account_id,))
+            conn.executemany(
+                """INSERT INTO daily_assets
+                   (account_id, snapshot_date, cash_balance, market_value, total_assets, net_value)
+                   VALUES (?,?,?,?,?,?)""",
+                [
+                    (account_id, r["date"], r["cash_balance"], r["market_value"],
+                     r["total_assets"], r.get("net_value"))
+                    for r in records
+                ],
+            )
+
     # ── 上传记录 ──────────────────────────────────────────
 
     def log_upload(self, account_id: int, filename, file_type, record_count, status="success", message=""):
