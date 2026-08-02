@@ -233,7 +233,7 @@ if not capital_changes.empty:
     ))
 
     fig_capital.update_layout(
-        barmode="grouped",
+        barmode="group",
         xaxis_title="日期",
         yaxis_title="单笔金额 (¥)",
         yaxis2=dict(title="累计净转入 (¥)", overlaying="y", side="right"),
