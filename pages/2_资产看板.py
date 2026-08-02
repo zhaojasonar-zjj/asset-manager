@@ -131,33 +131,15 @@ if not asset_history.empty:
             x=chart_data["date"], y=chart_data["total_assets"],
             name="总资产", line=dict(color="#2563eb", width=2),
             mode="lines",
-        ))
-    if "cash_balance" in chart_data.columns:
-        fig.add_trace(go.Scatter(
-            x=chart_data["date"], y=chart_data["cash_balance"],
-            name="现金", line=dict(color="#16a34a", width=1.5, dash="dot"),
-            mode="lines",
-        ))
-    if "market_value" in chart_data.columns:
-        fig.add_trace(go.Scatter(
-            x=chart_data["date"], y=chart_data["market_value"],
-            name="市值", line=dict(color="#f59e0b", width=1.5, dash="dot"),
-            mode="lines",
-        ))
-    if "net_value" in chart_data.columns:
-        fig.add_trace(go.Scatter(
-            x=chart_data["date"], y=chart_data["net_value"],
-            name="净值", line=dict(color="#8b5cf6", width=2),
-            mode="lines", yaxis="y2",
+            fill="tozeroy",
+            fillcolor="rgba(37, 99, 235, 0.08)",
         ))
 
     fig.update_layout(
         xaxis_title="日期",
-        yaxis_title="金额 (¥)",
-        yaxis2=dict(title="净值", overlaying="y", side="right"),
+        yaxis_title="总资产 (¥)",
         height=400,
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=20, r=20, t=20, b=20),
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -191,6 +173,11 @@ st.markdown("### 🏦 本金变动记录（银行 ↔ 证券）")
 capital_changes = get_capital_changes(db, account_id)
 
 if not capital_changes.empty:
+    # 转入为正、转出为负，统一用带符号金额
+    capital_changes["signed_amount"] = capital_changes.apply(
+        lambda r: r["amount"] if r["direction"] == "转入" else -r["amount"], axis=1
+    )
+
     # 汇总卡片
     inflow_total = capital_changes[capital_changes["direction"] == "转入"]["amount"].sum()
     outflow_total = capital_changes[capital_changes["direction"] == "转出"]["amount"].sum()
@@ -205,26 +192,24 @@ if not capital_changes.empty:
 
     st.markdown("")
 
-    # 累计净转入曲线
-    import plotly.graph_objects as go
+    # 资金变动瀑布图 + 累计净转入折线
     chart_df = capital_changes.copy()
     chart_df["date"] = chart_df["date"].astype(str)
 
     fig_capital = go.Figure()
-    # 转入柱状图
-    inflow_df = chart_df[chart_df["direction"] == "转入"]
-    if not inflow_df.empty:
-        fig_capital.add_trace(go.Bar(
-            x=inflow_df["date"], y=inflow_df["amount"],
-            name="转入", marker_color="#16a34a",
-        ))
-    # 转出柱状图
-    outflow_df = chart_df[chart_df["direction"] == "转出"]
-    if not outflow_df.empty:
-        fig_capital.add_trace(go.Bar(
-            x=outflow_df["date"], y=outflow_df["amount"],
-            name="转出", marker_color="#dc2626",
-        ))
+    # 柱状图：正负金额统一展示（蓝=转入，橙=转出，色盲友好）
+    fig_capital.add_trace(go.Bar(
+        x=chart_df["date"],
+        y=chart_df["signed_amount"],
+        name="资金变动",
+        marker_color=[
+            "#1f77b4" if v > 0 else "#ff7f0e"
+            for v in chart_df["signed_amount"]
+        ],
+        text=chart_df["signed_amount"].apply(lambda x: f"¥{x:,.0f}"),
+        textposition="outside",
+        textfont_size=9,
+    ))
     # 累计净转入折线
     fig_capital.add_trace(go.Scatter(
         x=chart_df["date"], y=chart_df["cumulative"],
@@ -233,11 +218,11 @@ if not capital_changes.empty:
     ))
 
     fig_capital.update_layout(
-        barmode="group",
+        barmode="relative",
         xaxis_title="日期",
         yaxis_title="单笔金额 (¥)",
         yaxis2=dict(title="累计净转入 (¥)", overlaying="y", side="right"),
-        height=350,
+        height=400,
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=20, r=20, t=20, b=20),
@@ -248,7 +233,9 @@ if not capital_changes.empty:
     st.markdown("#### 📋 变动明细")
     display_changes = capital_changes.copy()
     display_changes["date"] = display_changes["date"].astype(str)
-    display_changes["amount"] = display_changes["amount"].apply(lambda x: f"¥ {x:,.2f}")
+    display_changes["signed_amount"] = display_changes["signed_amount"].apply(
+        lambda x: f"{'+' if x > 0 else ''}¥ {x:,.2f}"
+    )
     display_changes["balance_after"] = display_changes["balance_after"].apply(
         lambda x: f"¥ {x:,.2f}" if x else "-"
     )
@@ -257,7 +244,7 @@ if not capital_changes.empty:
         "date": "日期",
         "type": "类型",
         "direction": "方向",
-        "amount": "金额",
+        "signed_amount": "金额",
         "balance_after": "转账后余额",
         "bank": "存管银行",
         "cumulative": "累计净转入",
