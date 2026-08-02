@@ -1,11 +1,12 @@
-"""个人股票资产管理 — 主页
+"""个人股票资产管理 — 主页（多账户版）
 
 运行: streamlit run app.py
 """
 import streamlit as st
 from core.database import Database
+from core.price_fetcher import fetch_realtime_prices
+from core.portfolio import calculate_market_value
 
-# ── 页面配置 ─────────────────────────────────────────────
 st.set_page_config(
     page_title="股票资产管理",
     page_icon="📊",
@@ -17,9 +18,7 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* 减少顶部留白 */
     .block-container { padding-top: 2rem; padding-bottom: 2rem; max-width: 1200px; }
-    /* 卡片样式 */
     [data-testid="stMetric"] {
         background: #f8fafc;
         border-radius: 10px;
@@ -27,109 +26,81 @@ st.markdown(
         border: 1px solid #e2e8f0;
     }
     [data-testid="stMetricValue"] { font-size: 1.4rem; }
-    /* 侧边栏 */
     [data-testid="stSidebar"] { background: #fafbfc; }
-    /* 表格 */
-    .stDataFrame { border-radius: 8px; overflow: hidden; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ── 数据库实例 ───────────────────────────────────────────
-@st.cache_resource
-def get_db():
-    return Database()
+st.markdown("# 📊 股票资产管理")
+st.markdown("多账户 · 多券商 · 独立管理")
 
+db = Database()
+accounts = db.get_all_accounts()
 
-db = get_db()
-
-# ── 侧边栏 ───────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### 📊 股票资产管理")
+if not accounts:
     st.markdown("---")
+    st.info("👆 请先在左侧「数据上传」页面创建账户并导入数据")
+    st.stop()
 
-    tx_count = db.get_transaction_count()
-    ff_count = db.get_fund_flow_count()
-    brokers = db.get_brokers()
+# ── 全局概览：所有账户汇总 ───────────────────────────────
+st.markdown("---")
+st.markdown("### 📂 账户概览")
 
-    st.markdown("**数据概览**")
-    st.markdown(f"- 交割单记录: **{tx_count}** 条")
-    st.markdown(f"- 资金流水: **{ff_count}** 条")
-    st.markdown(f"- 券商数量: **{len(brokers)}** 个")
-    if brokers:
-        st.markdown(f"  {' · '.join(brokers)}")
-    st.markdown("---")
+total_assets_all = 0
+total_cash_all = 0
+total_mv_all = 0
+total_pnl_all = 0
+total_deposits_all = 0
 
-    st.markdown("**导航**")
-    st.markdown("📁 [数据上传](数据上传)")
-    st.markdown("📊 [资产看板](资产看板)")
-    st.markdown("💰 [资金流水](资金流水)")
-    st.markdown("📈 [持仓明细](持仓明细)")
-    st.markdown("---")
-    st.caption("基于 Streamlit + SQLite")
-
-
-# ── 主页内容 ─────────────────────────────────────────────
-if tx_count == 0 and ff_count == 0:
-    # 空状态引导
-    st.markdown("## 👋 欢迎使用股票资产管理")
-    st.markdown(
-        """
-        一个轻量级的个人 A 股资产管理工具，支持：
-
-        - 📁 **多券商交割单/对账单/资金明细单**自动解析（Excel）
-        - 📈 **实时行情**自动拉取（腾讯财经接口）
-        - 💰 **资金流水**对账与汇总
-        - 📊 **资产看板**：持仓市值、历史曲线、净值曲线
-
-        ---
-
-        ### 🚀 快速开始
-
-        1. 在左侧导航点击 **数据上传**
-        2. 上传你的券商交割单 Excel 文件
-        3. 系统自动识别格式并导入数据库
-        4. 前往 **资产看板** 查看持仓与资产概况
-        """
-    )
-else:
-    # 有数据时显示概览
-    st.markdown("## 📊 资产概览")
-
-    holdings = db.get_holdings()
-    cash = db.get_cash_balance()
-    deposits = db.get_total_deposits()
+for acc in accounts:
+    account_id = acc["id"]
+    cash = db.get_cash_balance(account_id)
+    holdings = db.get_holdings(account_id)
+    deposits = db.get_total_deposits(account_id)
 
     if not holdings.empty:
-        from core.price_fetcher import fetch_realtime_prices
-        from core.portfolio import calculate_market_value
-
         codes = holdings["stock_code"].unique().tolist()
-        with st.spinner("正在获取实时行情..."):
-            prices = fetch_realtime_prices(codes)
-        market_value, pnl, enriched = calculate_market_value(holdings, prices)
+        prices = fetch_realtime_prices(codes)
+        mv, pnl, _, _ = calculate_market_value(holdings, prices)
     else:
-        market_value = 0
-        pnl = 0
-        prices = {}
+        mv, pnl = 0, 0
 
-    total_assets = cash + market_value
-    net_value = total_assets / deposits if deposits > 0 else 0
-    pnl_pct = (pnl / (market_value - pnl) * 100) if (market_value - pnl) > 0 else 0
+    total_assets = cash + mv
+    total_assets_all += total_assets
+    total_cash_all += cash
+    total_mv_all += mv
+    total_pnl_all += pnl
+    total_deposits_all += deposits
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("总资产", f"¥ {total_assets:,.2f}")
-    col2.metric("现金余额", f"¥ {cash:,.2f}")
-    col3.metric("持仓市值", f"¥ {market_value:,.2f}")
-    col4.metric("累计盈亏", f"¥ {pnl:,.2f}", f"{pnl_pct:+.2f}%")
+    tx_count = db.get_transaction_count(account_id)
+    ff_count = db.get_fund_flow_count(account_id)
 
-    st.markdown("---")
+    with st.expander(f"**{acc['name']}** ({acc['broker']}) — 总资产 ¥ {total_assets:,.2f}", expanded=True):
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("总资产", f"¥ {total_assets:,.2f}")
+        col2.metric("现金余额", f"¥ {cash:,.2f}")
+        col3.metric("持仓市值", f"¥ {mv:,.2f}")
+        col4.metric("累计盈亏", f"¥ {pnl:,.2f}")
 
-    if deposits > 0:
-        col_a, col_b = st.columns(2)
+        col_a, col_b, col_c = st.columns(3)
         col_a.metric("累计净转入", f"¥ {deposits:,.2f}")
-        col_b.metric("净值", f"{net_value:.4f}", f"{(net_value - 1) * 100:+.2f}%")
+        col_b.metric("交割单", f"{tx_count} 条")
+        col_c.metric("资金流水", f"{ff_count} 条")
 
-    st.markdown("---")
-    st.info("👆 在左侧导航栏选择 **资产看板** 查看完整图表与分析")
+# ── 汇总 ────────────────────────────────────────────────
+st.markdown("---")
+st.markdown("### 📊 全部账户汇总")
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("总资产", f"¥ {total_assets_all:,.2f}")
+col2.metric("总现金", f"¥ {total_cash_all:,.2f}")
+col3.metric("总市值", f"¥ {total_mv_all:,.2f}")
+col4.metric("总盈亏", f"¥ {total_pnl_all:,.2f}")
+
+if total_deposits_all > 0:
+    net_value = total_assets_all / total_deposits_all
+    st.metric("整体净值", f"{net_value:.4f}", f"{(net_value - 1) * 100:+.2f}%")
+
+st.markdown("---")
+st.info("👆 在左侧导航栏选择具体页面查看详细信息")
