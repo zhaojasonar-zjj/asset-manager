@@ -14,6 +14,7 @@ from .price_fetcher import fetch_realtime_prices, fetch_history_close_prices
 def recalculate_holdings(transactions: pd.DataFrame) -> list[dict]:
     """根据交割单重建当前持仓（加权平均成本法）
 
+    新股申购代码→正式代码的映射已在解析器层面完成。
     返回: [{stock_code, stock_name, quantity, cost_price, total_cost}]
     """
     if transactions.empty:
@@ -42,8 +43,8 @@ def recalculate_holdings(transactions: pd.DataFrame) -> list[dict]:
 
         h = holdings[code]
         if row["trade_type"] == "买入":
-            # 买入：成本增加（settlement 为负，取绝对值）
-            buy_cost = abs(settlement)
+            # 买入：成本增加（settlement 为负表示扣款，取绝对值）
+            buy_cost = abs(settlement) if settlement != 0 else float(row.get("amount", 0))
             h["quantity"] += qty
             h["total_cost"] += buy_cost
             if h["quantity"] > 0:

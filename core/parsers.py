@@ -150,13 +150,17 @@ def parse_huatai_transactions(df: pd.DataFrame) -> pd.DataFrame:
     成交日期, 业务名称, 证券代码, 证券名称, 委托编号, 成交数量, 成交均价,
     成交金额, 手续费, 印花税, 过户费, 其他杂费, 发生金额, 股东代码, 操作, 备注
 
-    特点：
-    - 成交日期: 20230627 (整数)
-    - 证券代码: 2807 (整数，需 zfill 到 6 位)
-    - 业务名称: '证券买入' / '证券卖出' / '股息入帐' / '基金资金拨出'
-    - 成交数量: 买入为正，卖出为负！
-    - 发生金额: 买入为负，卖出为正 (即结算金额)
-    - 操作: '买入' / '卖出' / '其他'
+    业务名称分类：
+    - 证券买入 / 证券卖出          → 正常买卖
+    - 股息入帐 / 股息红利税补缴     → 分红
+    - 申购配号                     → 新股配号（不产生持仓，不计资金）
+    - 市值申购中签                  → 中签通知（不产生持仓，不计资金）
+    - 交收资金冻结 / 交收资金冻结取消 → 申购资金冻结/解冻（不产生持仓）
+    - 托管转出                     → 申购代码转出（不产生持仓）
+    - 新股申购确认缴款              → 真正扣款买入！产生持仓
+    - 新股入帐                     → 转入正式代码（不重复计持仓）
+    - 基金资金拨出 / 基金资金拨入    → 货币基金申赎
+    - 质押回购拆出 / 拆出质押购回   → 国债逆回购
     """
     df = _normalize_columns(df.copy())
 
@@ -167,10 +171,20 @@ def parse_huatai_transactions(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
+    # 证券代码统一为 6 位字符串
+    def _norm_code(val):
+        if pd.isna(val):
+            return ""
+        s = str(val).replace(".0", "").strip()
+        if s.isdigit():
+            return s.zfill(6)
+        return s
+
     result = pd.DataFrame({
         "trade_date":   df["成交日期"].apply(_parse_date),
-        "stock_code":   df["证券代码"].apply(lambda x: str(int(x)) if pd.notna(x) and _to_float(x) > 0 else str(x)).str.zfill(6) if df["证券代码"].dtype != object else df["证券代码"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip().str.zfill(6),
+        "stock_code":   df["证券代码"].apply(_norm_code),
         "stock_name":   df["证券名称"].astype(str).str.strip(),
+        "biz_name":     df["业务名称"].astype(str).str.strip(),
         "trade_type":   df["操作"].apply(_normalize_trade_type),
         "quantity":     df["成交数量"].apply(_to_float).abs(),
         "price":        df["成交均价"].apply(_to_float),
@@ -182,13 +196,49 @@ def parse_huatai_transactions(df: pd.DataFrame) -> pd.DataFrame:
         "settlement":   df["发生金额"].apply(_to_float),
     })
 
-    # 过滤无效行
+    # 过滤无效代码
     result = result[result["stock_code"].str.match(r"^\d{6}$", na=False)]
 
-    # 保留所有记录（包括股息入账、基金拨出等非买卖记录）
-    result = result[result["quantity"] > 0]
+    # ── 根据 biz_name 分类，设置 trade_type ──────────────────
+    # "证券买入" / "新股申购确认缴款" → 买入（产生持仓）
+    # "证券卖出" → 卖出
+    # 其他全部标记为 "其他"（不参与持仓重建）
+    result["trade_type"] = result.apply(
+        lambda r: "买入" if r["biz_name"] in ("证券买入", "新股申购确认缴款")
+        else "卖出" if r["biz_name"] == "证券卖出"
+        else "其他",
+        axis=1,
+    )
 
-    return result.reset_index(drop=True)
+    # 过滤掉 quantity=0 且 settlement=0 的纯通知记录（如市值申购中签、交收资金冻结/解冻）
+    # 但保留 settlement≠0 的记录（如新股申购确认缴款有 settlement）
+    result = result[(result["quantity"] > 0) | (result["settlement"] != 0)]
+
+    # ── 新股申购代码 → 正式代码映射 ──────────────────────────
+    # 通过「新股入帐」记录建立映射（入帐记录的代码为正式代码）
+    # 再通过同数量、同价格匹配对应的「新股申购确认缴款」记录（代码为申购代码）
+    entries = result[result["biz_name"] == "新股入帐"]
+    for _, entry in entries.iterrows():
+        formal_code = str(entry["stock_code"]).strip().zfill(6)
+        entry_qty = float(entry["quantity"])
+        entry_price = float(entry["price"])
+        # 找匹配的确认缴款记录
+        confirms = result[
+            (result["biz_name"] == "新股申购确认缴款")
+            & (result["quantity"] == entry_qty)
+            & (result["price"] == entry_price)
+        ]
+        for _, conf in confirms.iterrows():
+            purchase_code = str(conf["stock_code"]).strip().zfill(6)
+            if purchase_code != formal_code:
+                # 替换所有该申购代码的记录为正式代码
+                result.loc[result["stock_code"] == purchase_code, "stock_code"] = formal_code
+
+    # 删除「新股入帐」记录（避免在持仓重建中重复计算）
+    # 这些记录的 amount=0, settlement=0，不携带资金信息
+    result = result[result["biz_name"] != "新股入帐"].reset_index(drop=True)
+
+    return result
 
 
 # ── 华泰证券资金明细 ──────────────────────────────────────
