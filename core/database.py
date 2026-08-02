@@ -122,6 +122,28 @@ class Database:
             conn.close()
 
     def _init_schema(self):
+        # ── 迁移检测：旧表没有 account_id 列，需要重建 ──
+        # 先用独立连接检测，不经过 get_connection（避免 WAL 干扰）
+        probe = sqlite3.connect(str(self.db_path))
+        probe.row_factory = sqlite3.Row
+        needs_rebuild = False
+        for table in ("transactions", "fund_flows", "holdings", "daily_assets"):
+            try:
+                cols = probe.execute(f"PRAGMA table_info({table})").fetchall()
+                if cols and not any(c["name"] == "account_id" for c in cols):
+                    needs_rebuild = True
+                    break
+            except sqlite3.OperationalError:
+                pass
+        probe.close()
+
+        if needs_rebuild:
+            # 旧数据本身就是错的，直接删库重建
+            for suffix in ("", "-wal", "-shm"):
+                p = self.db_path.with_suffix(self.db_path.suffix + suffix) if suffix else self.db_path
+                if p.exists():
+                    p.unlink()
+
         with self.get_connection() as conn:
             conn.executescript(SCHEMA_SQL)
 
