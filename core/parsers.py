@@ -135,8 +135,21 @@ def parse_guojun_transactions(df: pd.DataFrame) -> pd.DataFrame:
         if extra_col in df.columns:
             result["other_fee"] += df[extra_col].apply(_to_float)
 
-    # 过滤无效行
-    result = result[(result["stock_code"].str.match(r"^\d{6}$", na=False)) & (result["quantity"] > 0)]
+    # ── 保留银行转存/转取记录（证券代码非数字，如 \t）──
+    bank_mask = df["交易类别"].astype(str).str.contains("证券转银行|银行转证券", na=False)
+    if bank_mask.any():
+        bank_rows = result[bank_mask].copy()
+        bank_rows["stock_code"] = "BANK"
+        bank_rows["stock_name"] = df.loc[bank_mask, "交易类别"].astype(str).str.strip()
+        bank_rows["trade_type"] = "其他"
+        bank_rows["quantity"] = 0.0
+
+    # 过滤无效行（6位数字代码 + 数量>0），但保留银行转存记录
+    normal_mask = (result["stock_code"].str.match(r"^\d{6}$", na=False)) & (result["quantity"] > 0)
+    if bank_mask.any():
+        result = pd.concat([result[normal_mask], bank_rows], ignore_index=True)
+    else:
+        result = result[normal_mask]
 
     return result.reset_index(drop=True)
 

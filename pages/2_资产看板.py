@@ -6,7 +6,7 @@ from datetime import datetime
 
 from core.database import Database
 from core.price_fetcher import fetch_realtime_prices
-from core.portfolio import calculate_market_value, build_asset_history
+from core.portfolio import calculate_market_value, build_asset_history, get_capital_changes
 
 st.set_page_config(page_title="资产看板", page_icon="📊", layout="wide")
 
@@ -183,3 +183,87 @@ if not asset_history.empty:
     st.dataframe(display_history, use_container_width=True, hide_index=True, height=500)
 else:
     st.info("暂无每日资产记录")
+
+# ── 本金变动记录 ────────────────────────────────────────
+st.markdown("---")
+st.markdown("### 🏦 本金变动记录（银行 ↔ 证券）")
+
+capital_changes = get_capital_changes(db, account_id)
+
+if not capital_changes.empty:
+    # 汇总卡片
+    inflow_total = capital_changes[capital_changes["direction"] == "转入"]["amount"].sum()
+    outflow_total = capital_changes[capital_changes["direction"] == "转出"]["amount"].sum()
+    net_total = inflow_total - outflow_total
+    record_count = len(capital_changes)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("累计转入", f"¥ {inflow_total:,.2f}")
+    col2.metric("累计转出", f"¥ {outflow_total:,.2f}")
+    col3.metric("净转入本金", f"¥ {net_total:,.2f}")
+    col4.metric("变动次数", f"{record_count} 次")
+
+    st.markdown("")
+
+    # 累计净转入曲线
+    import plotly.graph_objects as go
+    chart_df = capital_changes.copy()
+    chart_df["date"] = chart_df["date"].astype(str)
+
+    fig_capital = go.Figure()
+    # 转入柱状图
+    inflow_df = chart_df[chart_df["direction"] == "转入"]
+    if not inflow_df.empty:
+        fig_capital.add_trace(go.Bar(
+            x=inflow_df["date"], y=inflow_df["amount"],
+            name="转入", marker_color="#16a34a",
+        ))
+    # 转出柱状图
+    outflow_df = chart_df[chart_df["direction"] == "转出"]
+    if not outflow_df.empty:
+        fig_capital.add_trace(go.Bar(
+            x=outflow_df["date"], y=outflow_df["amount"],
+            name="转出", marker_color="#dc2626",
+        ))
+    # 累计净转入折线
+    fig_capital.add_trace(go.Scatter(
+        x=chart_df["date"], y=chart_df["cumulative"],
+        name="累计净转入", line=dict(color="#2563eb", width=2),
+        mode="lines+markers", yaxis="y2",
+    ))
+
+    fig_capital.update_layout(
+        barmode="grouped",
+        xaxis_title="日期",
+        yaxis_title="单笔金额 (¥)",
+        yaxis2=dict(title="累计净转入 (¥)", overlaying="y", side="right"),
+        height=350,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=20, b=20),
+    )
+    st.plotly_chart(fig_capital, use_container_width=True)
+
+    # 明细表
+    st.markdown("#### 📋 变动明细")
+    display_changes = capital_changes.copy()
+    display_changes["date"] = display_changes["date"].astype(str)
+    display_changes["amount"] = display_changes["amount"].apply(lambda x: f"¥ {x:,.2f}")
+    display_changes["balance_after"] = display_changes["balance_after"].apply(
+        lambda x: f"¥ {x:,.2f}" if x else "-"
+    )
+    display_changes["cumulative"] = display_changes["cumulative"].apply(lambda x: f"¥ {x:,.2f}")
+    display_changes = display_changes.rename(columns={
+        "date": "日期",
+        "type": "类型",
+        "direction": "方向",
+        "amount": "金额",
+        "balance_after": "转账后余额",
+        "bank": "存管银行",
+        "cumulative": "累计净转入",
+        "description": "备注",
+    })
+    display_changes = display_changes[["日期", "方向", "类型", "金额", "转账后余额", "存管银行", "累计净转入", "备注"]]
+    st.dataframe(display_changes, use_container_width=True, hide_index=True, height=400)
+else:
+    st.info("暂无银行↔证券资金变动记录")

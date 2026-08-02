@@ -301,3 +301,70 @@ def get_fund_flow_summary(fund_flows: pd.DataFrame) -> dict:
         "latest_balance": latest_balance,
         "record_count": len(fund_flows),
     }
+
+
+def get_capital_changes(db: Database, account_id: int) -> pd.DataFrame:
+    """获取银行↔证券 资金变动记录
+
+    数据来源：
+    - 华泰资金明细：flow_type 含 "银行转存"（转入）/"银行转取"（转出）
+    - 国泰君安交割单：stock_code="BANK"，stock_name 含 "证券转银行"/"银行转证券"
+
+    返回: DataFrame[date, type, direction, amount, balance_after, description]
+    """
+    records = []
+
+    # ── 从资金流水提取 ──
+    fund_flows = db.get_fund_flows(account_id)
+    if not fund_flows.empty:
+        bank_mask = fund_flows["flow_type"].str.contains("银行转存|银行转取", na=False)
+        bank_ff = fund_flows[bank_mask].copy()
+        for _, row in bank_ff.iterrows():
+            amount = float(row["amount"])
+            direction = "转入" if amount > 0 else "转出"
+            # 提取银行名称，如 "银行转存[招行存管]" → "招行存管"
+            flow_type = str(row["flow_type"])
+            bank_name = ""
+            if "[" in flow_type and "]" in flow_type:
+                bank_name = flow_type[flow_type.index("[")+1:flow_type.index("]")]
+            records.append({
+                "date": str(row["flow_date"]),
+                "type": flow_type,
+                "direction": direction,
+                "amount": round(abs(amount), 2),
+                "balance_after": float(row.get("balance", 0) or 0),
+                "bank": bank_name,
+                "description": str(row.get("description", "")),
+            })
+
+    # ── 从交割单提取（国泰君安等）──
+    transactions = db.get_transactions(account_id)
+    if not transactions.empty:
+        bank_tx = transactions[transactions["stock_code"] == "BANK"].copy()
+        for _, row in bank_tx.iterrows():
+            settlement = float(row["settlement"])
+            direction = "转入" if settlement > 0 else "转出"
+            name = str(row.get("stock_name", ""))
+            records.append({
+                "date": str(row["trade_date"]),
+                "type": name,
+                "direction": direction,
+                "amount": round(abs(settlement), 2),
+                "balance_after": 0.0,  # 国泰君安交割单中没有余额字段
+                "bank": "",
+                "description": name,
+            })
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+    df = df.sort_values("date").reset_index(drop=True)
+
+    # 计算累计净转入
+    df["cumulative"] = df.apply(
+        lambda r: r["amount"] if r["direction"] == "转入" else -r["amount"],
+        axis=1,
+    ).cumsum()
+
+    return df

@@ -199,6 +199,10 @@ class Database:
     def insert_transactions(self, df: pd.DataFrame, account_id: int):
         with self.get_connection() as conn:
             for _, row in df.iterrows():
+                code = str(row.get("stock_code", ""))
+                # 只对纯数字代码 zfill，非数字代码（如 BANK）原样保留
+                if code.isdigit():
+                    code = code.zfill(6)
                 conn.execute(
                     """INSERT INTO transactions
                        (account_id, trade_date, stock_code, stock_name, trade_type,
@@ -208,7 +212,7 @@ class Database:
                     (
                         account_id,
                         row.get("trade_date", ""),
-                        str(row.get("stock_code", "")).zfill(6),
+                        code,
                         row.get("stock_name", ""),
                         row.get("trade_type", ""),
                         float(row.get("quantity", 0) or 0),
