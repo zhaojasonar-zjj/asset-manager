@@ -82,7 +82,6 @@ for acc in accounts:
     total_deposits_all += deposits
 
     tx_count = db.get_transaction_count(account_id)
-    ff_count = db.get_fund_flow_count(account_id)
 
     with st.expander(f"**{acc['name']}** ({acc['broker']}) — 总资产 ¥ {total_assets:,.2f}", expanded=True):
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -92,10 +91,9 @@ for acc in accounts:
         col4.metric("类现金", f"¥ {cash_like_val:,.2f}")
         col5.metric("累计盈亏", f"¥ {pnl:,.2f}")
 
-        col_a, col_b, col_c = st.columns(3)
+        col_a, col_b = st.columns(2)
         col_a.metric("累计净转入", f"¥ {deposits:,.2f}")
         col_b.metric("交割单", f"{tx_count} 条")
-        col_c.metric("资金流水", f"{ff_count} 条")
 
 # ── 汇总 ────────────────────────────────────────────────
 st.markdown("---")
