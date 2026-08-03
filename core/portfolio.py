@@ -404,8 +404,19 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
             cash_balance=("balance", "last"),
         ).reset_index().sort_values("flow_date")
         daily_cash = daily_cash.rename(columns={"flow_date": "date"})
+    elif "fund_balance" in transactions.columns:
+        # 国泰君安：从交割单的 资金余额 字段取每日现金余额
+        tx_fb = transactions[transactions["fund_balance"].notna() & (transactions["fund_balance"] != 0)].copy()
+        if not tx_fb.empty:
+            tx_fb["trade_date"] = tx_fb["trade_date"].astype(str)
+            daily_cash = tx_fb.groupby("trade_date").agg(
+                cash_balance=("fund_balance", "last"),
+            ).reset_index().sort_values("trade_date")
+            daily_cash = daily_cash.rename(columns={"trade_date": "date"})
+        else:
+            daily_cash = pd.DataFrame(columns=["date", "cash_balance"])
     else:
-        # 无资金明细，从交割单 settlement 累计推算
+        # 无资金明细和资金余额，从交割单 settlement 累计推算
         tx = transactions.copy()
         tx["trade_date"] = tx["trade_date"].astype(str)
         daily_cash = tx.groupby("trade_date").agg(

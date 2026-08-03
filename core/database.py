@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     transfer_fee REAL DEFAULT 0,
     other_fee   REAL DEFAULT 0,
     settlement  REAL NOT NULL,
+    fund_balance REAL,
     asset_type  TEXT DEFAULT 'stock',
     created_at  TEXT DEFAULT (datetime('now', 'localtime')),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
@@ -199,9 +200,10 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_wh_acc ON weekly_holdings(account_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_wh_date ON weekly_holdings(snapshot_date)")
 
-        # ── asset_type 列迁移（增量，不删数据）──
+        # ── asset_type / fund_balance 列迁移（增量，不删数据）──
         # 用 get_connection 确保与 WAL 模式一致
         needs_asset_type_migration = False
+        needs_fund_balance_migration = False
         with self.get_connection() as conn:
             for table in ("transactions", "holdings"):
                 try:
@@ -215,6 +217,13 @@ class Database:
                 da_cols = conn.execute("PRAGMA table_info(daily_assets)").fetchall()
                 if da_cols and not any(c["name"] == "cash_like_value" for c in da_cols):
                     needs_asset_type_migration = True
+            except sqlite3.OperationalError:
+                pass
+            # 检查 fund_balance 列
+            try:
+                tx_cols = conn.execute("PRAGMA table_info(transactions)").fetchall()
+                if tx_cols and not any(c["name"] == "fund_balance" for c in tx_cols):
+                    needs_fund_balance_migration = True
             except sqlite3.OperationalError:
                 pass
 
@@ -260,6 +269,14 @@ class Database:
             # 清除历史快照（市值拆分变了，需要重建）
             with self.get_connection() as conn:
                 conn.execute("DELETE FROM daily_assets")
+
+        # fund_balance 列迁移（单独执行，不依赖 asset_type 迁移）
+        if needs_fund_balance_migration:
+            with self.get_connection() as conn:
+                try:
+                    conn.execute("ALTER TABLE transactions ADD COLUMN fund_balance REAL")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
 
     # ── 账户管理 ──────────────────────────────────────────
 
@@ -317,12 +334,15 @@ class Database:
                 # 只对纯数字代码 zfill，非数字代码（如 BANK）原样保留
                 if code.isdigit():
                     code = code.zfill(6)
+                # fund_balance 可能有 NaN
+                fb = row.get("fund_balance")
+                fb = float(fb) if pd.notna(fb) and fb else None
                 conn.execute(
                     """INSERT INTO transactions
                        (account_id, trade_date, stock_code, stock_name, trade_type,
                         quantity, price, amount, commission, stamp_tax,
-                        transfer_fee, other_fee, settlement, asset_type)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        transfer_fee, other_fee, settlement, fund_balance, asset_type)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         account_id,
                         row.get("trade_date", ""),
@@ -337,6 +357,7 @@ class Database:
                         float(row.get("transfer_fee", 0) or 0),
                         float(row.get("other_fee", 0) or 0),
                         float(row.get("settlement", 0) or 0),
+                        fb,
                         row.get("asset_type", "stock"),
                     ),
                 )
@@ -558,8 +579,9 @@ class Database:
 
         优先级：
         1. 资金流水表中最新的 balance 字段
-        2. 资金流水 amount 字段累加
-        3. 交割单 settlement 字段推算
+        2. 交割单中最新的 资金余额 字段（国泰君安有此列）
+        3. 资金流水 amount 字段累加
+        4. 从交割单推算：银证转账净额 + 非交易记录 settlement
         """
         with self.get_connection() as conn:
             # 优先：资金流水中的最新余额
@@ -571,7 +593,21 @@ class Database:
             if row and row["balance"] is not None:
                 return row["balance"]
 
-            # 其次：资金流水 amount 累加
+            # 交割单中有 fund_balance 列的（国泰君安），取最新一条的余额
+            tx_cols = conn.execute("PRAGMA table_info(transactions)").fetchall()
+            col_names = [c["name"] for c in tx_cols]
+            
+            if "fund_balance" in col_names:
+                row = conn.execute(
+                    """SELECT fund_balance AS v FROM transactions
+                        WHERE account_id = ? AND fund_balance IS NOT NULL AND fund_balance != 0
+                        ORDER BY trade_date DESC, id DESC LIMIT 1""",
+                    (account_id,),
+                ).fetchone()
+                if row and row["v"]:
+                    return row["v"]
+
+            # 资金流水 amount 累加
             row = conn.execute(
                 "SELECT COALESCE(SUM(amount), 0) AS v FROM fund_flows WHERE account_id = ?",
                 (account_id,),
@@ -579,49 +615,44 @@ class Database:
             if row and row["v"] != 0:
                 return row["v"]
 
-            # 最后：从交割单推算
+            # 从交割单推算：银证转入/转出 的净额
             row = conn.execute(
-                "SELECT COALESCE(SUM(settlement), 0) AS v FROM transactions WHERE account_id = ?",
+                """SELECT COALESCE(SUM(settlement), 0) AS v FROM transactions
+                   WHERE account_id = ? AND stock_code = 'BANK'""",
                 (account_id,),
             ).fetchone()
-            return row["v"]
+            return row["v"] if row else 0
 
     def get_total_deposits(self, account_id: int) -> float:
-        """累计净转入资金（银行转入 - 银行转出）"""
+        """累计净转入资金（银行转入 - 银行转出）
+
+        优先从资金流水表查；无资金流水时从交割单 BANK 记录推算。
+        """
         with self.get_connection() as conn:
-            # 转入类：银行转存、银行转证券、银证转入、入金
+            # 先查资金流水表
             row = conn.execute(
                 """SELECT COALESCE(SUM(amount), 0) AS v FROM fund_flows
                    WHERE account_id = ?
-                     AND amount > 0
                      AND (flow_type LIKE '%银行转存%'
                        OR flow_type LIKE '%银行转取%'
                        OR flow_type LIKE '%银证转%'
-                       OR flow_type LIKE '%存管%转入%'
-                       OR flow_type LIKE '%银行转%证券%'
+                       OR flow_type LIKE '%存管%'
                        OR flow_type LIKE '%入金%'
-                       OR flow_type LIKE '%存入%')""",
+                       OR flow_type LIKE '%存入%'
+                       OR flow_type LIKE '%取出%'
+                       OR flow_type LIKE '%出金%')""",
                 (account_id,),
             ).fetchone()
-            deposits = row["v"] if row["v"] > 0 else 0
+            if row and row["v"] != 0:
+                return row["v"]
 
-            # 转出类：银行转取、证券转银行、银证转出、出金
+            # 无资金流水，从交割单 BANK 记录推算
             row = conn.execute(
-                """SELECT COALESCE(SUM(amount), 0) AS v FROM fund_flows
-                   WHERE account_id = ?
-                     AND amount < 0
-                     AND (flow_type LIKE '%银行转取%'
-                       OR flow_type LIKE '%银行转存%'
-                       OR flow_type LIKE '%银证转%'
-                       OR flow_type LIKE '%存管%转出%'
-                       OR flow_type LIKE '%银行转出%'
-                       OR flow_type LIKE '%出金%'
-                       OR flow_type LIKE '%取出%')""",
+                """SELECT COALESCE(SUM(settlement), 0) AS v FROM transactions
+                   WHERE account_id = ? AND stock_code = 'BANK'""",
                 (account_id,),
             ).fetchone()
-            withdrawals = abs(row["v"]) if row["v"] < 0 else 0
-
-            return deposits - withdrawals
+            return row["v"] if row else 0
 
     def get_transaction_count(self, account_id: int) -> int:
         with self.get_connection() as conn:

@@ -129,6 +129,7 @@ def parse_guojun_transactions(df: pd.DataFrame) -> pd.DataFrame:
         "transfer_fee": df.get("过户费", pd.Series(dtype=float)).apply(_to_float),
         "other_fee":    df.get("规费", pd.Series(dtype=float)).apply(_to_float),
         "settlement":   df["资金发生数"].apply(_to_float),
+        "fund_balance": df.get("资金余额", pd.Series(dtype=float)).apply(_to_float),
         "asset_type":   "stock",
     })
 
