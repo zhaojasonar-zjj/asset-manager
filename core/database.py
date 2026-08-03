@@ -180,6 +180,24 @@ class Database:
 
         with self.get_connection() as conn:
             conn.executescript(SCHEMA_SQL)
+            # 显式确保 weekly_holdings 表存在（应对旧库 executescript 不创建新表的情况）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS weekly_holdings (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id      INTEGER NOT NULL,
+                    snapshot_date   TEXT NOT NULL,
+                    stock_name      TEXT,
+                    stock_code      TEXT,
+                    quantity        REAL,
+                    close_price     REAL,
+                    market_value    REAL,
+                    asset_type      TEXT DEFAULT 'stock',
+                    UNIQUE(account_id, snapshot_date, stock_name),
+                    FOREIGN KEY (account_id) REFERENCES accounts(id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_wh_acc ON weekly_holdings(account_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_wh_date ON weekly_holdings(snapshot_date)")
 
         # ── asset_type 列迁移（增量，不删数据）──
         # 用 get_connection 确保与 WAL 模式一致
@@ -469,6 +487,21 @@ class Database:
     def insert_weekly_holdings(self, df: pd.DataFrame, account_id: int):
         """插入每周持仓明细（INSERT OR REPLACE 去重）"""
         with self.get_connection() as conn:
+            # 确保表存在（防御性，应对旧数据库迁移不完整）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS weekly_holdings (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id      INTEGER NOT NULL,
+                    snapshot_date   TEXT NOT NULL,
+                    stock_name      TEXT,
+                    stock_code      TEXT,
+                    quantity        REAL,
+                    close_price     REAL,
+                    market_value    REAL,
+                    asset_type      TEXT DEFAULT 'stock',
+                    UNIQUE(account_id, snapshot_date, stock_name)
+                )
+            """)
             for _, row in df.iterrows():
                 conn.execute(
                     """INSERT OR REPLACE INTO weekly_holdings
