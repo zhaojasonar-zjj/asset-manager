@@ -170,51 +170,95 @@ def fetch_history_kline(
 ) -> list[dict]:
     """获取历史日K线数据
 
+    腾讯 API 单次最多返回约 640 条。如果日期跨度超过 640 个交易日（约 2.5 年），
+    自动分段拉取并拼接。
+
     返回: [{"date": "YYYY-MM-DD", "open": float, "close": float, "high": float, "low": float, "volume": float}]
     """
     tencent_code = _to_tencent_code(stock_code)
-    # 腾讯接口要求日期格式为 YYYY-MM-DD（带横杠）
-    sd = start_date.replace("-", "") if start_date else ""
-    ed = end_date.replace("-", "") if end_date else ""
-    if sd:
-        sd = f"{sd[:4]}-{sd[4:6]}-{sd[6:8]}"
-    if ed:
-        ed = f"{ed[:4]}-{ed[4:6]}-{ed[6:8]}"
-    url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={tencent_code},day,{sd},{ed},{count},{fq}"
 
-    try:
-        resp = requests.get(url, timeout=15)
-        data = resp.json()
-    except Exception:
-        return []
+    def _fetch(sd: str, ed: str, max_count: int) -> list[dict]:
+        """单次拉取 K 线"""
+        sd_fmt = sd.replace("-", "")
+        ed_fmt = ed.replace("-", "")
+        if sd_fmt:
+            sd_fmt = f"{sd_fmt[:4]}-{sd_fmt[4:6]}-{sd_fmt[6:8]}"
+        if ed_fmt:
+            ed_fmt = f"{ed_fmt[:4]}-{ed_fmt[4:6]}-{ed_fmt[6:8]}"
+        url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={tencent_code},day,{sd_fmt},{ed_fmt},{max_count},{fq}"
+        try:
+            resp = requests.get(url, timeout=15)
+            data = resp.json()
+        except Exception:
+            return []
 
-    result = []
-    # 腾讯接口返回格式可能为 {data: {code: {qfqday: [...]}}} 或 {code: {qfqday: [...]}}
-    stock_data = data.get("data", data) if isinstance(data, dict) else {}
-    if isinstance(stock_data, dict):
-        # 尝试多种 key
-        stock_data = stock_data.get(tencent_code, stock_data)
-    
-    # 优先取 qfq（前复权）数据
-    if isinstance(stock_data, dict):
-        kline = stock_data.get("qfqday") or stock_data.get("day") or []
-    else:
-        kline = []
+        stock_data = data.get("data", data) if isinstance(data, dict) else {}
+        if isinstance(stock_data, dict):
+            stock_data = stock_data.get(tencent_code, stock_data)
+        if isinstance(stock_data, dict):
+            kline = stock_data.get("qfqday") or stock_data.get("day") or []
+        else:
+            kline = []
 
-    for item in kline:
-        if len(item) >= 6:
-            result.append(
-                {
+        result = []
+        for item in kline:
+            if len(item) >= 6:
+                result.append({
                     "date": item[0],
                     "open": float(item[1]) if item[1] else 0,
                     "close": float(item[2]) if item[2] else 0,
                     "high": float(item[3]) if item[3] else 0,
                     "low": float(item[4]) if item[4] else 0,
                     "volume": float(item[5]) if item[5] else 0,
-                }
-            )
+                })
+        return result
 
-    return result
+    # 如果没有指定日期范围，直接单次拉取
+    if not start_date:
+        return _fetch("", "", count)
+
+    # 计算日期跨度，如果超过约 600 个交易日（约 2.5 年），分段拉取
+    try:
+        d_start = datetime.strptime(start_date[:10], "%Y-%m-%d")
+        d_end = datetime.strptime(end_date[:10], "%Y-%m-%d") if end_date else datetime.now()
+    except ValueError:
+        return _fetch(start_date, end_date, count)
+
+    total_days = (d_end - d_start).days
+    # 交易日约占日历日的 70%，640 条 ≈ 914 日历天
+    if total_days <= 914:
+        return _fetch(start_date, end_date, min(count, 640))
+
+    # 分段拉取：每段最多 600 个交易日
+    segments: list[list[dict]] = []
+    seg_start = d_start
+    seg_count = 0
+    while seg_start < d_end:
+        seg_end = min(seg_start + timedelta(days=850), d_end)  # ~600 trading days per segment
+        seg_data = _fetch(
+            seg_start.strftime("%Y-%m-%d"),
+            seg_end.strftime("%Y-%m-%d"),
+            640,
+        )
+        if not seg_data:
+            break
+        segments.append(seg_data)
+        seg_count += 1
+        # Move to next segment (skip 1 day to avoid duplicate)
+        seg_start = seg_end + timedelta(days=1)
+
+    # Merge segments, deduplicating by date
+    seen_dates: set[str] = set()
+    merged: list[dict] = []
+    for seg in segments:
+        for item in seg:
+            if item["date"] not in seen_dates:
+                seen_dates.add(item["date"])
+                merged.append(item)
+
+    # Sort by date
+    merged.sort(key=lambda x: x["date"])
+    return merged
 
 
 def fetch_history_close_prices(

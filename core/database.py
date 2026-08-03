@@ -105,6 +105,20 @@ CREATE TABLE IF NOT EXISTS weekly_assets (
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 
+CREATE TABLE IF NOT EXISTS weekly_holdings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER NOT NULL,
+    snapshot_date   TEXT NOT NULL,
+    stock_name      TEXT,
+    stock_code      TEXT,
+    quantity        REAL,
+    close_price     REAL,
+    market_value    REAL,
+    asset_type      TEXT DEFAULT 'stock',
+    UNIQUE(account_id, snapshot_date, stock_name),
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tx_acc   ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_tx_date  ON transactions(trade_date);
 CREATE INDEX IF NOT EXISTS idx_tx_code  ON transactions(stock_code);
@@ -113,6 +127,8 @@ CREATE INDEX IF NOT EXISTS idx_ff_date  ON fund_flows(flow_date);
 CREATE INDEX IF NOT EXISTS idx_da_acc   ON daily_assets(account_id);
 CREATE INDEX IF NOT EXISTS idx_wa_acc   ON weekly_assets(account_id);
 CREATE INDEX IF NOT EXISTS idx_wa_date  ON weekly_assets(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_wh_acc   ON weekly_holdings(account_id);
+CREATE INDEX IF NOT EXISTS idx_wh_date  ON weekly_holdings(snapshot_date);
 """
 
 
@@ -450,6 +466,37 @@ class Database:
                 conn, params=[account_id],
             )
 
+    def insert_weekly_holdings(self, df: pd.DataFrame, account_id: int):
+        """插入每周持仓明细（INSERT OR REPLACE 去重）"""
+        with self.get_connection() as conn:
+            for _, row in df.iterrows():
+                conn.execute(
+                    """INSERT OR REPLACE INTO weekly_holdings
+                       (account_id, snapshot_date, stock_name, stock_code,
+                        quantity, close_price, market_value, asset_type)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (
+                        account_id,
+                        str(row.get("date", "")),
+                        str(row.get("stock_name", "")),
+                        str(row.get("stock_code", "")),
+                        float(row.get("quantity", 0) or 0),
+                        float(row.get("close_price", 0) or 0),
+                        float(row.get("market_value", 0) or 0),
+                        "cash_like" if row.get("row_type") == "cash_like" else "stock",
+                    ),
+                )
+
+    def get_weekly_holdings(self, account_id: int) -> pd.DataFrame:
+        with self.get_connection() as conn:
+            try:
+                return pd.read_sql_query(
+                    "SELECT * FROM weekly_holdings WHERE account_id = ? ORDER BY snapshot_date ASC",
+                    conn, params=[account_id],
+                )
+            except sqlite3.OperationalError:
+                return pd.DataFrame()
+
     # ── 上传记录 ──────────────────────────────────────────
 
     def log_upload(self, account_id: int, filename, file_type, record_count, status="success", message=""):
@@ -565,6 +612,7 @@ class Database:
             conn.execute("DELETE FROM holdings     WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM daily_assets WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM weekly_assets WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM weekly_holdings WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM upload_log   WHERE account_id = ?", (account_id,))
 
     def clear_all_data(self):
@@ -575,5 +623,6 @@ class Database:
             conn.execute("DELETE FROM holdings")
             conn.execute("DELETE FROM daily_assets")
             conn.execute("DELETE FROM weekly_assets")
+            conn.execute("DELETE FROM weekly_holdings")
             conn.execute("DELETE FROM upload_log")
             conn.execute("DELETE FROM accounts")

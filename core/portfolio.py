@@ -11,6 +11,174 @@ from .database import Database
 from .price_fetcher import fetch_realtime_prices, fetch_history_close_prices, fetch_history_kline
 
 
+# ── 常见 A 股名称→代码兜底映射（交易记录中可能没有的常见股票）──
+COMMON_NAME_TO_CODE: dict[str, str] = {
+    "中国平安": "601318",
+    "邮储银行": "601658",
+    "工商银行": "601398",
+    "建设银行": "601939",
+    "农业银行": "601288",
+    "中国银行": "601988",
+    "交通银行": "601328",
+    "招商银行": "600036",
+    "兴业银行": "601166",
+    "浦发银行": "600000",
+    "民生银行": "600016",
+    "中信银行": "601998",
+    "光大银行": "601818",
+    "华夏银行": "600015",
+    "北京银行": "601169",
+    "南京银行": "601009",
+    "宁波银行": "002142",
+    "杭州银行": "600926",
+    "上海银行": "601229",
+    "江苏银行": "600919",
+    "苏州银行": "002966",
+    "成都银行": "601838",
+    "长沙银行": "601577",
+    "郑州银行": "002936",
+    "青岛银行": "002948",
+    "西安银行": "600928",
+    "厦门银行": "601187",
+    "重庆银行": "601963",
+    "沪农商行": "601825",
+    "苏农银行": "603323",
+    "江阴银行": "002807",
+    "张家港行": "002839",
+    "无锡银行": "600908",
+    "常熟银行": "601128",
+    "紫金银行": "601860",
+    "瑞丰银行": "601528",
+    "青农商行": "002958",
+    "中国建筑": "601668",
+    "中国中铁": "601390",
+    "中国铁建": "601186",
+    "中国交建": "601800",
+    "中国电建": "601669",
+    "中国中冶": "601618",
+    "中国石油": "601857",
+    "中国石化": "600028",
+    "中国海油": "600938",
+    "中国神华": "601088",
+    "中国铝业": "601600",
+    "中国黄金": "600916",
+    "山东黄金": "600547",
+    "紫金矿业": "601899",
+    "中国平安": "601318",
+    "中国人寿": "601628",
+    "中国太保": "601601",
+    "新华保险": "601336",
+    "中国电信": "601728",
+    "中国移动": "600941",
+    "中国联通": "600050",
+    "中国中免": "601888",
+    "中国神华": "601088",
+    "贵州茅台": "600519",
+    "五粮液": "000858",
+    "洋河股份": "002304",
+    "泸州老窖": "000568",
+    "山西汾酒": "600809",
+    "古井贡酒": "000596",
+    "今世缘": "603369",
+    "老白干酒": "600559",
+    "海尔智家": "600690",
+    "美的集团": "000333",
+    "格力电器": "000651",
+    "海康威视": "002415",
+    "京东方A": "000725",
+    "万科A": "000002",
+    "保利发展": "600048",
+    "招商蛇口": "001979",
+    "绿地控股": "600606",
+    "华夏幸福": "600340",
+    "荣盛发展": "002146",
+    "金地集团": "600383",
+    "宋城演艺": "300144",
+    "老凤祥": "600612",
+    "爱尔眼科": "300015",
+    "白云山": "600332",
+    "云南白药": "000538",
+    "片仔癀": "600436",
+    "同仁堂": "600085",
+    "恒瑞医药": "600276",
+    "药明康德": "603259",
+    "迈瑞医疗": "300760",
+    "心脉医疗": "688016",
+    "泰格医药": "300347",
+    "长春高新": "000661",
+    "智飞生物": "300122",
+    "沃森生物": "300142",
+    "康泰生物": "300601",
+    "华兰生物": "002007",
+    "上海医药": "601607",
+    "华润三九": "000999",
+    "白云山": "600332",
+    "天士力": "600535",
+    "康缘药业": "600557",
+    "以岭药业": "002603",
+    "康龙化成": "300759",
+    "昭衍新药": "603127",
+    "药石科技": "300725",
+    "中信金属": "601618",
+    "国泰君安": "601211",
+    "中信证券": "600030",
+    "海通证券": "600837",
+    "华泰证券": "601688",
+    "广发证券": "000776",
+    "东方财富": "300059",
+    "招商证券": "600999",
+    "兴业证券": "601377",
+    "东方证券": "600958",
+    "申万宏源": "000166",
+    "国信证券": "002736",
+    "中金公司": "601995",
+    "中国银河": "601881",
+    "长城证券": "002939",
+    "天风证券": "601162",
+    "华林证券": "002945",
+    "国元证券": "000728",
+    "国海证券": "000750",
+    "长江证券": "000783",
+    "山西证券": "002500",
+    "西部证券": "002673",
+    "华安证券": "600909",
+    "财通证券": "601108",
+    "浙商证券": "601878",
+    "东兴证券": "601198",
+    "国投资本": "600061",
+    "红塔证券": "601236",
+    "中泰证券": "600918",
+    "中银证券": "601696",
+    "锦龙股份": "000712",
+    "华鑫股份": "600621",
+    "陕西能源": "001286",
+    "华润新能": "001248",
+    "华电新能": "600930",
+    "宝地矿业": "601121",
+    "屹唐股份": "688282",
+    "星昊医药": "430021",
+    "泰金新能": "688813",
+    "中国黄金": "600916",
+    "菜百股份": "605599",
+    "周大生": "002867",
+    "巨星科技": "002444",
+    "惠科股份": "001399",
+    "马可波罗": "001386",
+    "300ETF": "510300",
+    "H股ETF": "510900",
+    "医药ETF": "512010",
+    "创业板ETF": "159915",
+    "上证50ETF": "510050",
+    "中证500ETF": "510500",
+    "科创50ETF": "588000",
+    "沪深300ETF": "510300",
+    "券商ETF": "512000",
+    "银行ETF": "512800",
+    "消费ETF": "159928",
+    "红利ETF": "510880",
+}
+
+
 def recalculate_holdings(transactions: pd.DataFrame) -> list[dict]:
     """根据交割单重建当前持仓（加权平均成本法）
 
@@ -160,11 +328,12 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
 
     策略：
     1. 从资金流水取每日现金余额（前向填充到所有交易日）
-    2. 从交割单逐日重建持仓（区分股票/类现金）
-    3. 批量获取所有交易过股票的完整 K 线（同时得到交易日历）
-    4. 按交易日 × 持仓 × 当日收盘价计算市值（类现金用成本价）
-    5. 合并每周资产数据（补充缺失的交易日 + 校对）
-    6. 结果缓存到 daily_assets 表
+    2. 从每周资产持仓明细建立持仓检查点（弥补交割单历史缺失）
+    3. 从交割单逐日重建持仓（在检查点之间用交易增量）
+    4. 批量获取所有股票的完整 K 线（同时得到交易日历）
+    5. 按交易日 × 持仓 × 当日收盘价计算市值（类现金用成本价）
+    6. 合并每周资产汇总数据（补充缺失日期 + 校对）
+    7. 结果缓存到 daily_assets 表
     """
     # 有缓存且不强制重建 → 直接返回
     if not force_rebuild:
@@ -175,11 +344,12 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
     fund_flows = db.get_fund_flows(account_id)
     transactions = db.get_transactions(account_id)
     weekly_assets = db.get_weekly_assets(account_id)
+    weekly_holdings = db.get_weekly_holdings(account_id)
 
-    if fund_flows.empty and transactions.empty and weekly_assets.empty:
+    if fund_flows.empty and transactions.empty and weekly_assets.empty and weekly_holdings.empty:
         return pd.DataFrame()
 
-    # ── 0. 准备每周资产数据 ────────────────────────────────
+    # ── 0. 准备每周资产汇总 ────────────────────────────────
     weekly_lookup: dict[str, dict] = {}  # date → {stock_value, cash_like_value, cash_balance, total_assets}
     if not weekly_assets.empty:
         for _, row in weekly_assets.iterrows():
@@ -190,6 +360,41 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
                 "cash_balance": float(row.get("cash_balance", 0) or 0),
                 "total_assets": float(row.get("total_assets", 0) or 0),
             }
+
+    # ── 0b. 准备每周持仓检查点 ────────────────────────────
+    # 从交易记录建立 股票名称→代码 映射，叠加常见股票兜底映射
+    name_to_code: dict[str, str] = {}
+    # 先加载常见映射
+    name_to_code.update(COMMON_NAME_TO_CODE)
+    # 再叠加交易记录中的映射（优先级更高）
+    if not transactions.empty:
+        for _, tx_row in transactions.iterrows():
+            name = str(tx_row.get("stock_name", "")).strip().replace(" ", "")
+            code = str(tx_row.get("stock_code", "")).strip().zfill(6)
+            if name and code and name != "nan" and code != "nan" and code.isdigit():
+                name_to_code[name] = code
+
+    # 创建每周持仓快照: date → {code → {qty, cost, asset_type}}
+    weekly_snapshots: dict[str, dict[str, dict]] = {}
+    if not weekly_holdings.empty:
+        for date, group in weekly_holdings.groupby("snapshot_date"):
+            snapshot = {}
+            for _, wh_row in group.iterrows():
+                name = str(wh_row.get("stock_name", "")).strip().replace(" ", "")
+                code = str(wh_row.get("stock_code", "")).strip()
+                if not code:
+                    code = name_to_code.get(name, "")
+                qty = float(wh_row.get("quantity", 0) or 0)
+                mv = float(wh_row.get("market_value", 0) or 0)
+                if code and mv > 0 and qty > 0:
+                    asset_type = wh_row.get("asset_type", "stock")
+                    snapshot[code] = {
+                        "qty": qty,
+                        "cost": mv,  # 用市值作为"成本"（仅影响PnL基准，不影响市值计算）
+                        "asset_type": asset_type,
+                    }
+            if snapshot:
+                weekly_snapshots[str(date)] = snapshot
 
     # ── 1. 每日现金余额 ──────────────────────────────────────
     if not fund_flows.empty:
@@ -209,20 +414,32 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
         daily_cash = daily_cash.rename(columns={"trade_date": "date"})
         daily_cash["cash_balance"] = daily_cash["cash_balance"].cumsum()
 
-    # ── 2. 逐日重建持仓（按交易日期序列）────────────────────
+    # ── 2. 逐日重建持仓（交割单 + 每周检查点）──────────────
     tx_buy_sell = transactions[transactions["trade_type"].isin(["买入", "卖出"])].copy()
     if not tx_buy_sell.empty:
         tx_buy_sell["trade_date"] = tx_buy_sell["trade_date"].astype(str)
         tx_buy_sell = tx_buy_sell.sort_values("trade_date").reset_index(drop=True)
 
-    # 交易日期集合（来自资金流水 + 交割单）
+    # 所有事件日期（资金流水 + 交割单 + 每周快照）
     tx_dates = sorted(set(daily_cash["date"].tolist()) |
                       set(tx_buy_sell["trade_date"].tolist()) if not tx_buy_sell.empty else set())
+    if weekly_snapshots:
+        tx_dates = sorted(set(tx_dates) | set(weekly_snapshots.keys()))
 
-    # 逐日持仓快照：code → {qty, cost, asset_type}
+    # 用最早的每周快照作为初始持仓
+    current_h: dict[str, dict] = {}
+    if weekly_snapshots:
+        earliest_weekly = min(weekly_snapshots.keys())
+        current_h = {c: dict(v) for c, v in weekly_snapshots[earliest_weekly].items()}
+
+    # 逐日处理：遇到每周检查点就重置持仓，然后用交割单增量更新
     daily_holdings: dict[str, dict[str, dict]] = {}
-    current_h: dict[str, dict] = {}  # code → {qty, cost, asset_type}
     for d in tx_dates:
+        # 每周检查点：重置为每周快照（弥补缺失的交割单）
+        if d in weekly_snapshots:
+            current_h = {c: dict(v) for c, v in weekly_snapshots[d].items()}
+
+        # 应用当日交割单增量
         if not tx_buy_sell.empty:
             day_tx = tx_buy_sell[tx_buy_sell["trade_date"] == d]
             for _, row in day_tx.iterrows():
@@ -241,8 +458,7 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
                         current_h[code]["qty"] -= qty
         daily_holdings[d] = {c: dict(v) for c, v in current_h.items() if v["qty"] > 0.01}
 
-    # ── 3. 获取所有交易过股票的完整 K 线（只拉股票，不拉类现金）──
-    # 区分股票 vs 类现金代码
+    # ── 3. 获取所有股票的完整 K 线（只拉股票，不拉类现金）──
     code_asset_type: dict[str, str] = {}
     for holdings_snapshot in daily_holdings.values():
         for code, h in holdings_snapshot.items():
@@ -250,7 +466,6 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
 
     stock_codes = sorted([c for c, t in code_asset_type.items() if t != "cash_like"])
 
-    # K 线日期就是交易日历
     code_kline: dict[str, list[dict]] = {}
     all_trading_days: set[str] = set()
 
@@ -263,26 +478,22 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
         for item in kline:
             all_trading_days.add(item["date"])
 
-    # 交易日历：从所有 K 线中取并集，按日期排序
-    trading_days = sorted(all_trading_days)
+    # 交易日历：K线日期 + 每周快照日期
+    trading_days = sorted(all_trading_days | set(weekly_lookup.keys()))
     if not trading_days:
-        # K线全部失败，退回到资金流水日期 + 每周资产日期
         trading_days = sorted(set(daily_cash["date"].tolist()) | set(weekly_lookup.keys()))
 
     # ── 4. 按交易日计算每日市值 ────────────────────────────
-    # 构建 code → {date: close} 查找表
     code_price: dict[str, dict[str, float]] = {}
     for code, kline in code_kline.items():
         code_price[code] = {item["date"]: item["close"] for item in kline}
 
-    # 按交易日遍历，持仓在交易日间保持不变（用最近交易日的持仓快照）
-    # 同时现金余额也前向填充
     records = []
     prev_holdings: dict[str, dict] = {}
     prev_cash = 0.0
 
     for d in trading_days:
-        # 更新当日持仓快照（如果这天有交易）
+        # 更新当日持仓快照
         if d in daily_holdings:
             prev_holdings = daily_holdings[d]
 
@@ -296,7 +507,6 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
         cash_like_mv = 0.0
         for code, h in prev_holdings.items():
             if h.get("asset_type", "stock") == "cash_like":
-                # 类现金：市值 = 总成本（本金，利息在赎回时实现）
                 cash_like_mv += h["cost"]
             else:
                 price = code_price.get(code, {}).get(d, 0)
@@ -305,20 +515,18 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
         mv = stock_mv + cash_like_mv
         total = prev_cash + mv
 
-        # 如果有每周资产数据，补充：当交易日没有交割单/资金流水推算时，
-        # 用每周资产数据填充（仅限有周数据的日期）
-        data_source = "calc"  # 推算
+        # 合并每周资产数据
+        data_source = "calc"
         if d in weekly_lookup:
             wa = weekly_lookup[d]
-            # 如果推算的总资产为0（早期无持仓数据），直接用每周资产
             if total < 1 or (not prev_holdings and prev_cash == 0):
+                # 推算为0，直接用每周数据
                 stock_mv = wa["stock_value"]
                 cash_like_mv = wa["cash_like_value"]
                 prev_cash = wa["cash_balance"]
                 total = wa["total_assets"]
                 data_source = "weekly"
             else:
-                # 有推算数据，标注为可校对
                 data_source = "calc+weekly"
 
         records.append({
@@ -346,7 +554,6 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
     if not records:
         return pd.DataFrame()
 
-    # 按日期排序
     records.sort(key=lambda r: r["date"])
 
     daily_df = pd.DataFrame(records)
@@ -357,7 +564,6 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
         daily_df["net_value"] = None
 
     # ── 5. 缓存到数据库 ────────────────────────────────────
-    # daily_assets 表不存 data_source 字段，只存数值
     cache_records = [
         {k: v for k, v in r.items() if k != "data_source"}
         for r in records
