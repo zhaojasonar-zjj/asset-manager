@@ -416,8 +416,9 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
         else:
             daily_cash = pd.DataFrame(columns=["date", "cash_balance"])
     else:
-        # 无资金明细和资金余额，从交割单 settlement 累计推算
-        tx = transactions.copy()
+        # 无资金明细和资金余额，从交割单推算
+        # 排除 BANK 记录（银证转入/转出是本金变动，不是交易产生的现金变化）
+        tx = transactions[transactions["stock_code"] != "BANK"].copy()
         tx["trade_date"] = tx["trade_date"].astype(str)
         daily_cash = tx.groupby("trade_date").agg(
             cash_balance=("settlement", "sum"),
