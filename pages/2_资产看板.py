@@ -39,15 +39,16 @@ holdings = db.get_holdings(account_id)
 cash = db.get_cash_balance(account_id)
 deposits = db.get_total_deposits(account_id)
 
-# ── 实时行情 ─────────────────────────────────────────────
+# ── 实时行情（只拉股票，不拉类现金）─────────────────────
 prices = {}
 prices_ok = True
 if not holdings.empty:
-    codes = holdings["stock_code"].unique().tolist()
-    with st.spinner("正在获取实时行情..."):
-        prices = fetch_realtime_prices(codes)
+    stock_codes = holdings[holdings.get("asset_type", "stock") != "cash_like"]["stock_code"].unique().tolist()
+    if stock_codes:
+        with st.spinner("正在获取实时行情..."):
+            prices = fetch_realtime_prices(stock_codes)
 
-market_value, pnl, enriched, prices_ok = calculate_market_value(holdings, prices)
+stock_value, cash_like_value, market_value, pnl, enriched, prices_ok = calculate_market_value(holdings, prices)
 total_assets = cash + market_value
 
 # ── 数据来源标识 ─────────────────────────────────────────
@@ -58,11 +59,12 @@ else:
 
 # ── 汇总卡片 ────────────────────────────────────────────
 st.markdown("---")
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("总资产", f"¥ {total_assets:,.2f}")
 col2.metric("现金余额", f"¥ {cash:,.2f}")
-col3.metric("持仓市值", f"¥ {market_value:,.2f}")
-col4.metric("累计盈亏", f"¥ {pnl:,.2f}")
+col3.metric("股票市值", f"¥ {stock_value:,.2f}")
+col4.metric("类现金", f"¥ {cash_like_value:,.2f}")
+col5.metric("累计盈亏", f"¥ {pnl:,.2f}")
 
 st.caption(source_note)
 if not prices_ok:
@@ -86,10 +88,15 @@ if not enriched.empty:
     display["total_cost"] = display["total_cost"].apply(lambda x: f"¥ {x:,.2f}")
     display["pnl"] = display["pnl"].apply(lambda x: f"¥ {x:,.2f}")
     display["pnl_pct"] = display["pnl_pct"].apply(lambda x: f"{x:+.2f}%")
+    if "asset_type" in display.columns:
+        display["asset_type"] = display["asset_type"].apply(
+            lambda x: "类现金" if x == "cash_like" else "股票"
+        )
 
     show_cols = {
         "stock_code": "代码",
         "stock_name": "名称",
+        "asset_type": "类型",
         "quantity": "持仓数量",
         "cost_price": "成本价",
         "latest_price": "最新价",
@@ -156,13 +163,23 @@ if not asset_history.empty:
     display_history = display_history.sort_values("date", ascending=False)
     
     # 格式化显示
-    for col in ["cash_balance", "market_value", "total_assets"]:
+    for col in ["cash_balance", "market_value", "cash_like_value", "total_assets"]:
         if col in display_history.columns:
             display_history[col] = display_history[col].apply(lambda x: f"¥ {x:,.2f}" if pd.notna(x) else "-")
     if "net_value" in display_history.columns:
         display_history["net_value"] = display_history["net_value"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
     
-    st.dataframe(display_history, use_container_width=True, hide_index=True, height=500)
+    # 列名映射
+    col_names = {
+        "date": "日期",
+        "cash_balance": "现金余额",
+        "market_value": "持仓市值",
+        "cash_like_value": "类现金",
+        "total_assets": "总资产",
+        "net_value": "净值",
+    }
+    available_cols = [c for c in col_names if c in display_history.columns]
+    st.dataframe(display_history[available_cols].rename(columns=col_names), use_container_width=True, hide_index=True, height=500)
 else:
     st.info("暂无每日资产记录")
 

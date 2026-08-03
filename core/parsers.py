@@ -128,6 +128,7 @@ def parse_guojun_transactions(df: pd.DataFrame) -> pd.DataFrame:
         "transfer_fee": df.get("过户费", pd.Series(dtype=float)).apply(_to_float),
         "other_fee":    df.get("规费", pd.Series(dtype=float)).apply(_to_float),
         "settlement":   df["资金发生数"].apply(_to_float),
+        "asset_type":   "stock",
     })
 
     # 合并所有费用为 other_fee（规费 + 经手费 + 清算费 + 前台费用 + 交易规费 + 证管费）
@@ -212,16 +213,31 @@ def parse_huatai_transactions(df: pd.DataFrame) -> pd.DataFrame:
     # 过滤无效代码
     result = result[result["stock_code"].str.match(r"^\d{6}$", na=False)]
 
-    # ── 根据 biz_name 分类，设置 trade_type ──────────────────
+    # ── 根据 biz_name 分类，设置 trade_type 和 asset_type ───
     # "证券买入" / "新股申购确认缴款" → 买入（产生持仓）
     # "证券卖出" → 卖出
+    # "基金资金拨出" → 货币基金申购 → 买入, cash_like
+    # "基金资金拨入" → 货币基金赎回 → 卖出, cash_like
+    # "质押回购拆出" → 国债逆回购拆出 → 买入, cash_like
+    # "拆出质押购回" → 国债逆回购购回 → 卖出, cash_like
     # 其他全部标记为 "其他"（不参与持仓重建）
-    result["trade_type"] = result.apply(
-        lambda r: "买入" if r["biz_name"] in ("证券买入", "新股申购确认缴款")
-        else "卖出" if r["biz_name"] == "证券卖出"
-        else "其他",
-        axis=1,
-    )
+    def _classify(row):
+        biz = row["biz_name"]
+        if biz in ("证券买入", "新股申购确认缴款"):
+            return pd.Series(["买入", "stock"])
+        if biz == "证券卖出":
+            return pd.Series(["卖出", "stock"])
+        if "基金资金拨出" in biz:
+            return pd.Series(["买入", "cash_like"])
+        if "基金资金拨入" in biz:
+            return pd.Series(["卖出", "cash_like"])
+        if "质押回购拆出" in biz:
+            return pd.Series(["买入", "cash_like"])
+        if "拆出质押购回" in biz:
+            return pd.Series(["卖出", "cash_like"])
+        return pd.Series(["其他", "stock"])
+
+    result[["trade_type", "asset_type"]] = result.apply(_classify, axis=1)
 
     # 过滤掉 quantity=0 且 settlement=0 的纯通知记录（如市值申购中签、交收资金冻结/解冻）
     # 但保留 settlement≠0 的记录（如新股申购确认缴款有 settlement）

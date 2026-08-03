@@ -15,7 +15,7 @@ def recalculate_holdings(transactions: pd.DataFrame) -> list[dict]:
     """根据交割单重建当前持仓（加权平均成本法）
 
     新股申购代码→正式代码的映射已在解析器层面完成。
-    返回: [{stock_code, stock_name, quantity, cost_price, total_cost}]
+    返回: [{stock_code, stock_name, quantity, cost_price, total_cost, asset_type}]
     """
     if transactions.empty:
         return []
@@ -39,6 +39,7 @@ def recalculate_holdings(transactions: pd.DataFrame) -> list[dict]:
                 "stock_name": row.get("stock_name", ""),
                 "quantity": 0.0,
                 "total_cost": 0.0,
+                "asset_type": row.get("asset_type", "stock"),
             }
 
         h = holdings[code]
@@ -75,13 +76,13 @@ def recalculate_holdings(transactions: pd.DataFrame) -> list[dict]:
     return result
 
 
-def calculate_market_value(holdings: pd.DataFrame, prices: dict) -> tuple[float, float, pd.DataFrame, bool]:
-    """计算持仓市值
+def calculate_market_value(holdings: pd.DataFrame, prices: dict) -> tuple[float, float, float, float, pd.DataFrame, bool]:
+    """计算持仓市值（拆分股票市值 + 类现金）
 
-    返回: (market_value, total_pnl, enriched_holdings, prices_ok)
+    返回: (stock_value, cash_like_value, total_market_value, total_pnl, enriched_holdings, prices_ok)
     """
     if holdings.empty:
-        return 0.0, 0.0, holdings, True
+        return 0.0, 0.0, 0.0, 0.0, holdings, True
 
     enriched = holdings.copy()
     enriched["latest_price"] = 0.0
@@ -92,27 +93,37 @@ def calculate_market_value(holdings: pd.DataFrame, prices: dict) -> tuple[float,
     prices_ok = True
     for idx, row in enriched.iterrows():
         code = str(row["stock_code"]).strip().zfill(6)
-        price_info = prices.get(code)
-        if price_info and price_info.get("price", 0) > 0:
-            latest_price = float(price_info["price"])
-            enriched.at[idx, "latest_price"] = latest_price
-            enriched.at[idx, "market_value"] = latest_price * row["quantity"]
-        else:
-            # 行情获取失败，用成本价兜底
+        asset_type = row.get("asset_type", "stock")
+
+        if asset_type == "cash_like":
+            # 类现金：不拉行情，用成本价（货币基金 NAV≈1.0，逆回购面值）
             latest_price = float(row.get("cost_price", 0))
             enriched.at[idx, "latest_price"] = latest_price
             enriched.at[idx, "market_value"] = latest_price * row["quantity"]
-            prices_ok = False
+        else:
+            price_info = prices.get(code)
+            if price_info and price_info.get("price", 0) > 0:
+                latest_price = float(price_info["price"])
+                enriched.at[idx, "latest_price"] = latest_price
+                enriched.at[idx, "market_value"] = latest_price * row["quantity"]
+            else:
+                # 行情获取失败，用成本价兜底
+                latest_price = float(row.get("cost_price", 0))
+                enriched.at[idx, "latest_price"] = latest_price
+                enriched.at[idx, "market_value"] = latest_price * row["quantity"]
+                prices_ok = False
 
         cost = float(row.get("total_cost", 0))
         mv = float(enriched.at[idx, "market_value"])
         enriched.at[idx, "pnl"] = mv - cost
         enriched.at[idx, "pnl_pct"] = ((mv - cost) / cost * 100) if cost > 0 else 0.0
 
-    market_value = enriched["market_value"].sum()
+    stock_value = enriched[enriched.get("asset_type", "stock") != "cash_like"]["market_value"].sum()
+    cash_like_value = enriched[enriched.get("asset_type", "stock") == "cash_like"]["market_value"].sum()
+    total_market_value = enriched["market_value"].sum()
     total_pnl = enriched["pnl"].sum()
 
-    return market_value, total_pnl, enriched, prices_ok
+    return stock_value, cash_like_value, total_market_value, total_pnl, enriched, prices_ok
 
 
 def take_daily_snapshot(db: Database, account_id: int):
@@ -121,10 +132,13 @@ def take_daily_snapshot(db: Database, account_id: int):
     cash = db.get_cash_balance(account_id)
 
     if not holdings.empty:
-        codes = holdings["stock_code"].unique().tolist()
-        prices = fetch_realtime_prices(codes)
-        market_value, _, _, _ = calculate_market_value(holdings, prices)
+        # 只拉股票行情，cash_like 不拉
+        stock_codes = holdings[holdings.get("asset_type", "stock") != "cash_like"]["stock_code"].unique().tolist()
+        prices = fetch_realtime_prices(stock_codes) if stock_codes else {}
+        stock_value, cash_like_value, market_value, _, _, _ = calculate_market_value(holdings, prices)
     else:
+        stock_value = 0.0
+        cash_like_value = 0.0
         market_value = 0.0
 
     total_assets = cash + market_value
@@ -132,7 +146,7 @@ def take_daily_snapshot(db: Database, account_id: int):
     net_value = total_assets / deposits if deposits > 0 else None
 
     today = datetime.now().strftime("%Y-%m-%d")
-    db.save_daily_asset(account_id, today, cash, market_value, total_assets, net_value)
+    db.save_daily_asset(account_id, today, cash, market_value, total_assets, net_value, cash_like_value)
 
 
 def build_asset_history(db: Database, account_id: int, force_rebuild: bool = False) -> pd.DataFrame:
@@ -140,9 +154,9 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
 
     策略：
     1. 从资金流水取每日现金余额（前向填充到所有交易日）
-    2. 从交割单逐日重建持仓
+    2. 从交割单逐日重建持仓（区分股票/类现金）
     3. 批量获取所有交易过股票的完整 K 线（同时得到交易日历）
-    4. 按交易日 × 持仓 × 当日收盘价计算市值
+    4. 按交易日 × 持仓 × 当日收盘价计算市值（类现金用成本价）
     5. 结果缓存到 daily_assets 表
     """
     # 有缓存且不强制重建 → 直接返回
@@ -185,26 +199,36 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
     tx_dates = sorted(set(daily_cash["date"].tolist()) |
                       set(tx_buy_sell["trade_date"].tolist()) if not tx_buy_sell.empty else set())
 
-    # 逐日持仓快照
-    daily_holdings: dict[str, dict[str, float]] = {}
-    current_h: dict[str, float] = {}
+    # 逐日持仓快照：code → {qty, cost, asset_type}
+    daily_holdings: dict[str, dict[str, dict]] = {}
+    current_h: dict[str, dict] = {}  # code → {qty, cost, asset_type}
     for d in tx_dates:
         if not tx_buy_sell.empty:
             day_tx = tx_buy_sell[tx_buy_sell["trade_date"] == d]
             for _, row in day_tx.iterrows():
                 code = str(row["stock_code"]).strip().zfill(6)
                 qty = float(row["quantity"])
-                current_h[code] = current_h.get(code, 0.0)
+                settlement = float(row.get("settlement", 0))
+                if code not in current_h:
+                    current_h[code] = {"qty": 0.0, "cost": 0.0, "asset_type": row.get("asset_type", "stock")}
                 if row["trade_type"] == "买入":
-                    current_h[code] += qty
+                    current_h[code]["qty"] += qty
+                    current_h[code]["cost"] += abs(settlement) if settlement != 0 else float(row.get("amount", 0))
                 elif row["trade_type"] == "卖出":
-                    current_h[code] -= qty
-        daily_holdings[d] = {c: q for c, q in current_h.items() if q > 0.01}
+                    if current_h[code]["qty"] > 0:
+                        ratio = min(qty / current_h[code]["qty"], 1.0)
+                        current_h[code]["cost"] -= current_h[code]["cost"] * ratio
+                        current_h[code]["qty"] -= qty
+        daily_holdings[d] = {c: dict(v) for c, v in current_h.items() if v["qty"] > 0.01}
 
-    # ── 3. 获取所有交易过股票的完整 K 线 ────────────────────
-    all_codes = set()
-    for holdings in daily_holdings.values():
-        all_codes.update(holdings.keys())
+    # ── 3. 获取所有交易过股票的完整 K 线（只拉股票，不拉类现金）──
+    # 区分股票 vs 类现金代码
+    code_asset_type: dict[str, str] = {}
+    for holdings_snapshot in daily_holdings.values():
+        for code, h in holdings_snapshot.items():
+            code_asset_type[code] = h.get("asset_type", "stock")
+
+    stock_codes = sorted([c for c, t in code_asset_type.items() if t != "cash_like"])
 
     # K 线日期就是交易日历
     code_kline: dict[str, list[dict]] = {}
@@ -213,7 +237,7 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
     start_d = min(tx_dates) if tx_dates else datetime.now().strftime("%Y-%m-%d")
     end_d = datetime.now().strftime("%Y-%m-%d")
 
-    for code in sorted(all_codes):
+    for code in stock_codes:
         kline = fetch_history_kline(code, start_d, end_d, 640)
         code_kline[code] = kline
         for item in kline:
@@ -234,7 +258,7 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
     # 按交易日遍历，持仓在交易日间保持不变（用最近交易日的持仓快照）
     # 同时现金余额也前向填充
     records = []
-    prev_holdings: dict[str, float] = {}
+    prev_holdings: dict[str, dict] = {}
     prev_cash = 0.0
 
     for d in trading_days:
@@ -247,17 +271,24 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
         if not cash_rows.empty:
             prev_cash = float(cash_rows.iloc[-1]["cash_balance"])
 
-        # 市值：用当日收盘价 × 持仓数量
-        mv = 0.0
-        for code, qty in prev_holdings.items():
-            price = code_price.get(code, {}).get(d, 0)
-            mv += price * qty
+        # 市值：股票用当日收盘价，类现金用成本价
+        stock_mv = 0.0
+        cash_like_mv = 0.0
+        for code, h in prev_holdings.items():
+            if h.get("asset_type", "stock") == "cash_like":
+                # 类现金：市值 = 总成本（本金，利息在赎回时实现）
+                cash_like_mv += h["cost"]
+            else:
+                price = code_price.get(code, {}).get(d, 0)
+                stock_mv += price * h["qty"]
 
+        mv = stock_mv + cash_like_mv
         total = prev_cash + mv
         records.append({
             "date": d,
             "cash_balance": round(prev_cash, 2),
             "market_value": round(mv, 2),
+            "cash_like_value": round(cash_like_mv, 2),
             "total_assets": round(total, 2),
         })
 

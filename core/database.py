@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     transfer_fee REAL DEFAULT 0,
     other_fee   REAL DEFAULT 0,
     settlement  REAL NOT NULL,
+    asset_type  TEXT DEFAULT 'stock',
     created_at  TEXT DEFAULT (datetime('now', 'localtime')),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS holdings (
     quantity    REAL NOT NULL,
     cost_price  REAL NOT NULL,
     total_cost  REAL NOT NULL,
+    asset_type  TEXT DEFAULT 'stock',
     updated_at  TEXT DEFAULT (datetime('now', 'localtime')),
     UNIQUE(account_id, stock_code),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
@@ -71,6 +73,7 @@ CREATE TABLE IF NOT EXISTS daily_assets (
     snapshot_date   TEXT NOT NULL,
     cash_balance    REAL NOT NULL,
     market_value    REAL NOT NULL,
+    cash_like_value REAL DEFAULT 0,
     total_assets    REAL NOT NULL,
     net_value       REAL,
     created_at      TEXT DEFAULT (datetime('now', 'localtime')),
@@ -147,6 +150,68 @@ class Database:
         with self.get_connection() as conn:
             conn.executescript(SCHEMA_SQL)
 
+        # ── asset_type 列迁移（增量，不删数据）──
+        needs_asset_type_migration = False
+        probe2 = sqlite3.connect(str(self.db_path))
+        probe2.row_factory = sqlite3.Row
+        for table in ("transactions", "holdings"):
+            try:
+                cols = probe2.execute(f"PRAGMA table_info({table})").fetchall()
+                if cols and not any(c["name"] == "asset_type" for c in cols):
+                    needs_asset_type_migration = True
+                    break
+            except sqlite3.OperationalError:
+                pass
+        # daily_assets 也需要 cash_like_value 列
+        try:
+            da_cols = probe2.execute("PRAGMA table_info(daily_assets)").fetchall()
+            if da_cols and not any(c["name"] == "cash_like_value" for c in da_cols):
+                needs_asset_type_migration = True
+        except sqlite3.OperationalError:
+            pass
+        probe2.close()
+
+        if needs_asset_type_migration:
+            with self.get_connection() as conn:
+                # SQLite ALTER TABLE ADD COLUMN 是安全的增量操作
+                for table in ("transactions", "holdings"):
+                    try:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN asset_type TEXT DEFAULT 'stock'")
+                    except sqlite3.OperationalError:
+                        pass  # 列已存在
+                try:
+                    conn.execute("ALTER TABLE daily_assets ADD COLUMN cash_like_value REAL DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
+
+                # 标记类现金记录：逆回购(204xxx)、券商货币基金(940xxx)
+                for table in ("transactions", "holdings"):
+                    conn.execute(
+                        f"UPDATE {table} SET asset_type = 'cash_like' "
+                        f"WHERE stock_code LIKE '204%' OR stock_code LIKE '940%'"
+                    )
+
+                # 修正 trade_type：cash_like 中 settlement<0 → 买入，settlement>0 → 卖出
+                conn.execute(
+                    "UPDATE transactions SET trade_type = '买入' "
+                    "WHERE asset_type = 'cash_like' AND settlement < 0 AND trade_type = '其他'"
+                )
+                conn.execute(
+                    "UPDATE transactions SET trade_type = '卖出' "
+                    "WHERE asset_type = 'cash_like' AND settlement > 0 AND trade_type = '其他'"
+                )
+
+            # 重建所有账户持仓（trade_type 变了，持仓需要重算）
+            from core.portfolio import recalculate_holdings
+            for acc in self.get_all_accounts():
+                tx_df = self.get_transactions(acc["id"])
+                holdings_list = recalculate_holdings(tx_df)
+                self.replace_holdings(acc["id"], holdings_list)
+
+            # 清除历史快照（市值拆分变了，需要重建）
+            with self.get_connection() as conn:
+                conn.execute("DELETE FROM daily_assets")
+
     # ── 账户管理 ──────────────────────────────────────────
 
     def create_account(self, name: str, broker: str, holder: str = "") -> int:
@@ -207,8 +272,8 @@ class Database:
                     """INSERT INTO transactions
                        (account_id, trade_date, stock_code, stock_name, trade_type,
                         quantity, price, amount, commission, stamp_tax,
-                        transfer_fee, other_fee, settlement)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        transfer_fee, other_fee, settlement, asset_type)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         account_id,
                         row.get("trade_date", ""),
@@ -223,6 +288,7 @@ class Database:
                         float(row.get("transfer_fee", 0) or 0),
                         float(row.get("other_fee", 0) or 0),
                         float(row.get("settlement", 0) or 0),
+                        row.get("asset_type", "stock"),
                     ),
                 )
 
@@ -289,8 +355,8 @@ class Database:
             for h in holdings_list:
                 conn.execute(
                     """INSERT INTO holdings
-                       (account_id, stock_code, stock_name, quantity, cost_price, total_cost)
-                       VALUES (?,?,?,?,?,?)""",
+                       (account_id, stock_code, stock_name, quantity, cost_price, total_cost, asset_type)
+                       VALUES (?,?,?,?,?,?,?)""",
                     (
                         account_id,
                         h["stock_code"],
@@ -298,6 +364,7 @@ class Database:
                         h["quantity"],
                         h["cost_price"],
                         h["total_cost"],
+                        h.get("asset_type", "stock"),
                     ),
                 )
 
@@ -310,13 +377,13 @@ class Database:
                 conn, params=[account_id],
             )
 
-    def save_daily_asset(self, account_id: int, date_str, cash, market_value, total, net_value=None):
+    def save_daily_asset(self, account_id: int, date_str, cash, market_value, total, net_value=None, cash_like_value=0):
         with self.get_connection() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO daily_assets
-                   (account_id, snapshot_date, cash_balance, market_value, total_assets, net_value)
-                   VALUES (?,?,?,?,?,?)""",
-                (account_id, date_str, cash, market_value, total, net_value),
+                   (account_id, snapshot_date, cash_balance, market_value, cash_like_value, total_assets, net_value)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (account_id, date_str, cash, market_value, cash_like_value, total, net_value),
             )
 
     def replace_daily_assets(self, account_id: int, records: list[dict]):
@@ -325,11 +392,11 @@ class Database:
             conn.execute("DELETE FROM daily_assets WHERE account_id = ?", (account_id,))
             conn.executemany(
                 """INSERT INTO daily_assets
-                   (account_id, snapshot_date, cash_balance, market_value, total_assets, net_value)
-                   VALUES (?,?,?,?,?,?)""",
+                   (account_id, snapshot_date, cash_balance, market_value, cash_like_value, total_assets, net_value)
+                   VALUES (?,?,?,?,?,?,?)""",
                 [
                     (account_id, r["date"], r["cash_balance"], r["market_value"],
-                     r["total_assets"], r.get("net_value"))
+                     r.get("cash_like_value", 0), r["total_assets"], r.get("net_value"))
                     for r in records
                 ],
             )
