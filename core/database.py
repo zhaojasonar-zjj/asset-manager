@@ -92,12 +92,27 @@ CREATE TABLE IF NOT EXISTS upload_log (
     message     TEXT
 );
 
+CREATE TABLE IF NOT EXISTS weekly_assets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER NOT NULL,
+    snapshot_date   TEXT NOT NULL,
+    stock_value     REAL DEFAULT 0,
+    cash_like_value REAL DEFAULT 0,
+    cash_balance    REAL DEFAULT 0,
+    total_assets    REAL NOT NULL,
+    created_at      TEXT DEFAULT (datetime('now', 'localtime')),
+    UNIQUE(account_id, snapshot_date),
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tx_acc   ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_tx_date  ON transactions(trade_date);
 CREATE INDEX IF NOT EXISTS idx_tx_code  ON transactions(stock_code);
 CREATE INDEX IF NOT EXISTS idx_ff_acc   ON fund_flows(account_id);
 CREATE INDEX IF NOT EXISTS idx_ff_date  ON fund_flows(flow_date);
 CREATE INDEX IF NOT EXISTS idx_da_acc   ON daily_assets(account_id);
+CREATE INDEX IF NOT EXISTS idx_wa_acc   ON weekly_assets(account_id);
+CREATE INDEX IF NOT EXISTS idx_wa_date  ON weekly_assets(snapshot_date);
 """
 
 
@@ -405,6 +420,33 @@ class Database:
                 ],
             )
 
+    # ── 每周资产 ──────────────────────────────────────────
+
+    def insert_weekly_assets(self, df: pd.DataFrame, account_id: int):
+        """插入每周资产快照（INSERT OR REPLACE 去重）"""
+        with self.get_connection() as conn:
+            for _, row in df.iterrows():
+                conn.execute(
+                    """INSERT OR REPLACE INTO weekly_assets
+                       (account_id, snapshot_date, stock_value, cash_like_value, cash_balance, total_assets)
+                       VALUES (?,?,?,?,?,?)""",
+                    (
+                        account_id,
+                        str(row["date"]),
+                        float(row.get("stock_value", 0) or 0),
+                        float(row.get("cash_like_value", 0) or 0),
+                        float(row.get("cash_balance", 0) or 0),
+                        float(row.get("total_assets", 0) or 0),
+                    ),
+                )
+
+    def get_weekly_assets(self, account_id: int) -> pd.DataFrame:
+        with self.get_connection() as conn:
+            return pd.read_sql_query(
+                "SELECT * FROM weekly_assets WHERE account_id = ? ORDER BY snapshot_date ASC",
+                conn, params=[account_id],
+            )
+
     # ── 上传记录 ──────────────────────────────────────────
 
     def log_upload(self, account_id: int, filename, file_type, record_count, status="success", message=""):
@@ -519,6 +561,7 @@ class Database:
             conn.execute("DELETE FROM fund_flows   WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM holdings     WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM daily_assets WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM weekly_assets WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM upload_log   WHERE account_id = ?", (account_id,))
 
     def clear_all_data(self):
@@ -528,5 +571,6 @@ class Database:
             conn.execute("DELETE FROM fund_flows")
             conn.execute("DELETE FROM holdings")
             conn.execute("DELETE FROM daily_assets")
+            conn.execute("DELETE FROM weekly_assets")
             conn.execute("DELETE FROM upload_log")
             conn.execute("DELETE FROM accounts")

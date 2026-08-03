@@ -6,7 +6,7 @@ from datetime import datetime
 
 from core.database import Database
 from core.price_fetcher import fetch_realtime_prices
-from core.portfolio import calculate_market_value, build_asset_history, get_capital_changes
+from core.portfolio import calculate_market_value, build_asset_history, get_capital_changes, cross_check_weekly_assets
 
 st.set_page_config(page_title="资产看板", page_icon="📊", layout="wide")
 
@@ -185,6 +185,75 @@ if not asset_history.empty:
     st.dataframe(display_history[available_cols].rename(columns=col_names), use_container_width=True, hide_index=True, height=500)
 else:
     st.info("暂无每日资产记录")
+
+# ── 每周资产校对 ────────────────────────────────────────
+st.markdown("---")
+st.markdown("### 🔍 每周资产校对")
+
+weekly_data = db.get_weekly_assets(account_id)
+if not weekly_data.empty:
+    st.caption(f"已导入 {len(weekly_data)} 周资产快照（{weekly_data['snapshot_date'].min()} ~ {weekly_data['snapshot_date'].max()}）")
+
+    check_df = cross_check_weekly_assets(db, account_id, threshold_pct=0.5)
+
+    if not check_df.empty:
+        # 统计
+        ok_count = (check_df["status"] == "ok").sum()
+        warn_count = (check_df["status"] == "warn").sum()
+        no_daily_count = (check_df["status"] == "no_daily").sum()
+        no_weekly_count = (check_df["status"] == "no_weekly").sum()
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("校对一致", f"{ok_count} 周", delta="✅" if warn_count == 0 else "")
+        col2.metric("误差超标", f"{warn_count} 周", delta="⚠️" if warn_count > 0 else "")
+        col3.metric("仅有周报", f"{no_daily_count} 周")
+        col4.metric("仅有日推算", f"{no_weekly_count} 周")
+
+        if warn_count > 0:
+            st.warning(f"⚠️ 有 {warn_count} 周的总资产误差超过 0.5%，需要人工核验。")
+
+        # 筛选显示
+        filter_options = ["全部", "误差超标", "校对一致", "仅有周报", "仅有日推算"]
+        status_filter = st.selectbox("筛选", filter_options, key="weekly_check_filter")
+
+        display_check = check_df.copy()
+        if status_filter == "误差超标":
+            display_check = display_check[display_check["status"] == "warn"]
+        elif status_filter == "校对一致":
+            display_check = display_check[display_check["status"] == "ok"]
+        elif status_filter == "仅有周报":
+            display_check = display_check[display_check["status"] == "no_daily"]
+        elif status_filter == "仅有日推算":
+            display_check = display_check[display_check["status"] == "no_weekly"]
+
+        display_check = display_check.sort_values("date", ascending=False)
+
+        # 格式化
+        for col in ["daily_total", "weekly_total", "diff"]:
+            if col in display_check.columns:
+                display_check[col] = display_check[col].apply(
+                    lambda x: f"¥ {x:,.2f}" if pd.notna(x) else "-"
+                )
+        if "diff_pct" in display_check.columns:
+            display_check["diff_pct"] = display_check["diff_pct"].apply(
+                lambda x: f"{x:.2f}%" if pd.notna(x) else "-"
+            )
+
+        status_map = {"ok": "✅ 一致", "warn": "⚠️ 超标", "no_daily": "📅 仅周报", "no_weekly": "📊 仅推算"}
+        display_check["status"] = display_check["status"].apply(lambda x: status_map.get(x, x))
+
+        display_check = display_check.rename(columns={
+            "date": "日期",
+            "daily_total": "推算总资产",
+            "weekly_total": "周报总资产",
+            "diff": "差额",
+            "diff_pct": "误差%",
+            "status": "状态",
+        })
+
+        st.dataframe(display_check, use_container_width=True, hide_index=True, height=400)
+else:
+    st.info("未导入每周资产数据。上传每周资产文件后可进行校对。")
 
 # ── 本金变动记录 ────────────────────────────────────────
 st.markdown("---")

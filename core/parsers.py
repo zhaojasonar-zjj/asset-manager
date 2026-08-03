@@ -4,6 +4,7 @@
 - 国泰君安交割单：交收日期/交易类别/资金发生数/资金余额
 - 华泰证券交割单：成交日期/业务名称/发生金额/操作
 - 华泰证券资金明细：日期/摘要/借方(收入)/贷方(支出)/资金余额
+- 华泰证券每周资产：持仓日期/证券代码/证券名称/持仓数量/收盘价/持仓市值
 """
 import pandas as pd
 import numpy as np
@@ -327,12 +328,115 @@ def parse_huatai_fund_flows(df: pd.DataFrame) -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
+# ── 华泰证券每周资产 ──────────────────────────────────────
+
+def parse_huatai_weekly_assets(df: pd.DataFrame) -> pd.DataFrame:
+    """解析华泰证券每周资产文件
+
+    列名：持仓日期, 证券代码, 证券名称, 持仓数量, 收盘价, 持仓市值
+
+    数据结构：
+    - 每个日期一组行，包含股票持仓、货币基金、现金
+    - "小计" 行的持仓市值 = 该日总资产
+    - "银证转入" 行记录当日的银证转账金额
+    - 股票行的证券代码为 NaN，证券名称为股票名称
+
+    返回 DataFrame 列:
+      date, stock_name, quantity, close_price, market_value, row_type
+      row_type: 'stock' | 'cash' | 'cash_like' | 'subtotal' | 'bank_transfer'
+    """
+    df = _normalize_columns(df.copy())
+
+    # 过滤空行
+    df = df.dropna(subset=["持仓日期"], how="all")
+    if df.empty:
+        return pd.DataFrame()
+
+    records = []
+    for _, row in df.iterrows():
+        date_str = _parse_date(row["持仓日期"])
+        if not date_str:
+            continue
+
+        code = str(row.get("证券代码", "")).strip()
+        name = str(row.get("证券名称", "")).strip()
+        if name == "nan":
+            name = ""
+        qty = _to_float(row.get("持仓数量"))
+        close_price = _to_float(row.get("收盘价"))
+        mv = _to_float(row.get("持仓市值"))
+
+        if code == "小计":
+            row_type = "subtotal"
+        elif code == "银证转入":
+            row_type = "bank_transfer"
+        elif name == "现金":
+            row_type = "cash"
+        elif name == "货币基金":
+            row_type = "cash_like"
+        elif name and mv != 0:
+            row_type = "stock"
+        else:
+            continue
+
+        records.append({
+            "date": date_str,
+            "stock_name": name,
+            "quantity": qty,
+            "close_price": close_price,
+            "market_value": mv,
+            "row_type": row_type,
+        })
+
+    if not records:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(records)
+    # 按日期排序
+    result = result.sort_values(["date", "row_type"]).reset_index(drop=True)
+    return result
+
+
+def summarize_weekly_assets(weekly_df: pd.DataFrame) -> pd.DataFrame:
+    """将每周资产明细汇总为每日快照
+
+    返回: [{date, stock_value, cash_like_value, cash_balance, total_assets}]
+    """
+    if weekly_df.empty:
+        return pd.DataFrame()
+
+    records = []
+    for date, group in weekly_df.groupby("date"):
+        stock_value = group.loc[group["row_type"] == "stock", "market_value"].sum()
+        cash_like_value = group.loc[group["row_type"] == "cash_like", "market_value"].sum()
+        cash_balance = group.loc[group["row_type"] == "cash", "market_value"].sum()
+        subtotal = group.loc[group["row_type"] == "subtotal", "market_value"].sum()
+        bank_transfer = group.loc[group["row_type"] == "bank_transfer", "market_value"].sum()
+
+        if subtotal == 0:
+            # 没有小计行（如首日只有银证转入），用成分加总
+            subtotal = stock_value + cash_like_value + cash_balance
+            if subtotal == 0 and bank_transfer > 0:
+                # 首日只有银证转入，总资产 = 转入金额
+                subtotal = bank_transfer
+
+        records.append({
+            "date": date,
+            "stock_value": round(stock_value, 2),
+            "cash_like_value": round(cash_like_value, 2),
+            "cash_balance": round(cash_balance, 2),
+            "total_assets": round(subtotal, 2),
+        })
+
+    return pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+
+
 # ── 自动识别 & 路由 ────────────────────────────────────────
 
 def detect_format(df: pd.DataFrame) -> str:
     """根据列名自动识别格式
 
-    返回: 'gtja_transactions' / 'huatai_transactions' / 'huatai_fund_flows' / 'unknown'
+    返回: 'gtja_transactions' / 'huatai_transactions' / 'huatai_fund_flows' / 'huatai_weekly_assets' / 'unknown'
     """
     cols = set(_normalize_col(c) for c in df.columns)
 
@@ -347,6 +451,10 @@ def detect_format(df: pd.DataFrame) -> str:
     # 华泰资金明细：有 日期 + 摘要 + 借方/贷方
     if "日期" in cols and "摘要" in cols and ("借方(收入)" in cols or "贷方(支出)" in cols):
         return "huatai_fund_flows"
+
+    # 华泰每周资产：有 持仓日期 + 持仓市值
+    if "持仓日期" in cols and "持仓市值" in cols:
+        return "huatai_weekly_assets"
 
     return "unknown"
 
@@ -389,6 +497,10 @@ def parse_excel_file(path: str | Path) -> list[dict]:
                 results.append({"format": fmt, "data": parsed, "sheet": sheet_name})
         elif fmt == "huatai_fund_flows":
             parsed = parse_huatai_fund_flows(df)
+            if not parsed.empty:
+                results.append({"format": fmt, "data": parsed, "sheet": sheet_name})
+        elif fmt == "huatai_weekly_assets":
+            parsed = parse_huatai_weekly_assets(df)
             if not parsed.empty:
                 results.append({"format": fmt, "data": parsed, "sheet": sheet_name})
 

@@ -163,7 +163,8 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
     2. 从交割单逐日重建持仓（区分股票/类现金）
     3. 批量获取所有交易过股票的完整 K 线（同时得到交易日历）
     4. 按交易日 × 持仓 × 当日收盘价计算市值（类现金用成本价）
-    5. 结果缓存到 daily_assets 表
+    5. 合并每周资产数据（补充缺失的交易日 + 校对）
+    6. 结果缓存到 daily_assets 表
     """
     # 有缓存且不强制重建 → 直接返回
     if not force_rebuild:
@@ -173,9 +174,22 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
 
     fund_flows = db.get_fund_flows(account_id)
     transactions = db.get_transactions(account_id)
+    weekly_assets = db.get_weekly_assets(account_id)
 
-    if fund_flows.empty and transactions.empty:
+    if fund_flows.empty and transactions.empty and weekly_assets.empty:
         return pd.DataFrame()
+
+    # ── 0. 准备每周资产数据 ────────────────────────────────
+    weekly_lookup: dict[str, dict] = {}  # date → {stock_value, cash_like_value, cash_balance, total_assets}
+    if not weekly_assets.empty:
+        for _, row in weekly_assets.iterrows():
+            d = str(row["snapshot_date"])
+            weekly_lookup[d] = {
+                "stock_value": float(row.get("stock_value", 0) or 0),
+                "cash_like_value": float(row.get("cash_like_value", 0) or 0),
+                "cash_balance": float(row.get("cash_balance", 0) or 0),
+                "total_assets": float(row.get("total_assets", 0) or 0),
+            }
 
     # ── 1. 每日现金余额 ──────────────────────────────────────
     if not fund_flows.empty:
@@ -252,8 +266,8 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
     # 交易日历：从所有 K 线中取并集，按日期排序
     trading_days = sorted(all_trading_days)
     if not trading_days:
-        # K线全部失败，退回到资金流水日期
-        trading_days = sorted(set(daily_cash["date"].tolist()))
+        # K线全部失败，退回到资金流水日期 + 每周资产日期
+        trading_days = sorted(set(daily_cash["date"].tolist()) | set(weekly_lookup.keys()))
 
     # ── 4. 按交易日计算每日市值 ────────────────────────────
     # 构建 code → {date: close} 查找表
@@ -290,16 +304,50 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
 
         mv = stock_mv + cash_like_mv
         total = prev_cash + mv
+
+        # 如果有每周资产数据，补充：当交易日没有交割单/资金流水推算时，
+        # 用每周资产数据填充（仅限有周数据的日期）
+        data_source = "calc"  # 推算
+        if d in weekly_lookup:
+            wa = weekly_lookup[d]
+            # 如果推算的总资产为0（早期无持仓数据），直接用每周资产
+            if total < 1 or (not prev_holdings and prev_cash == 0):
+                stock_mv = wa["stock_value"]
+                cash_like_mv = wa["cash_like_value"]
+                prev_cash = wa["cash_balance"]
+                total = wa["total_assets"]
+                data_source = "weekly"
+            else:
+                # 有推算数据，标注为可校对
+                data_source = "calc+weekly"
+
         records.append({
             "date": d,
             "cash_balance": round(prev_cash, 2),
             "market_value": round(mv, 2),
             "cash_like_value": round(cash_like_mv, 2),
             "total_assets": round(total, 2),
+            "data_source": data_source,
         })
+
+    # ── 4b. 补充每周资产中独有的日期（K线缺失的交易日）──
+    existing_dates = set(r["date"] for r in records)
+    for d, wa in weekly_lookup.items():
+        if d not in existing_dates:
+            records.append({
+                "date": d,
+                "cash_balance": round(wa["cash_balance"], 2),
+                "market_value": round(wa["stock_value"] + wa["cash_like_value"], 2),
+                "cash_like_value": round(wa["cash_like_value"], 2),
+                "total_assets": round(wa["total_assets"], 2),
+                "data_source": "weekly",
+            })
 
     if not records:
         return pd.DataFrame()
+
+    # 按日期排序
+    records.sort(key=lambda r: r["date"])
 
     daily_df = pd.DataFrame(records)
     deposits = db.get_total_deposits(account_id)
@@ -309,9 +357,73 @@ def build_asset_history(db: Database, account_id: int, force_rebuild: bool = Fal
         daily_df["net_value"] = None
 
     # ── 5. 缓存到数据库 ────────────────────────────────────
-    db.replace_daily_assets(account_id, records)
+    # daily_assets 表不存 data_source 字段，只存数值
+    cache_records = [
+        {k: v for k, v in r.items() if k != "data_source"}
+        for r in records
+    ]
+    db.replace_daily_assets(account_id, cache_records)
 
     return daily_df
+
+
+def cross_check_weekly_assets(db: Database, account_id: int, threshold_pct: float = 0.5) -> pd.DataFrame:
+    """校对每日资产与每周资产
+
+    对比同一日期的 daily_assets 和 weekly_assets 的 total_assets。
+    误差超过 threshold_pct 的标记为 "需核验"。
+
+    返回: DataFrame[date, daily_total, weekly_total, diff, diff_pct, status]
+          status: 'ok' | 'warn' | 'no_daily' | 'no_weekly'
+    """
+    daily = db.get_daily_assets(account_id)
+    weekly = db.get_weekly_assets(account_id)
+
+    if daily.empty and weekly.empty:
+        return pd.DataFrame()
+
+    daily_map: dict[str, float] = {}
+    if not daily.empty:
+        for _, row in daily.iterrows():
+            daily_map[str(row["snapshot_date"])] = float(row["total_assets"])
+
+    weekly_map: dict[str, float] = {}
+    if not weekly.empty:
+        for _, row in weekly.iterrows():
+            weekly_map[str(row["snapshot_date"])] = float(row["total_assets"])
+
+    all_dates = sorted(set(daily_map.keys()) | set(weekly_map.keys()))
+
+    records = []
+    for d in all_dates:
+        dt = daily_map.get(d)
+        wt = weekly_map.get(d)
+
+        if dt is not None and wt is not None and wt > 0:
+            diff = dt - wt
+            diff_pct = abs(diff) / wt * 100
+            status = "ok" if diff_pct <= threshold_pct else "warn"
+        elif dt is not None and wt is None:
+            diff = 0
+            diff_pct = 0
+            status = "no_weekly"
+        elif dt is None and wt is not None:
+            diff = 0
+            diff_pct = 0
+            status = "no_daily"
+        else:
+            continue
+
+        records.append({
+            "date": d,
+            "daily_total": round(dt, 2) if dt is not None else None,
+            "weekly_total": round(wt, 2) if wt is not None else None,
+            "diff": round(diff, 2) if dt is not None and wt is not None else None,
+            "diff_pct": round(diff_pct, 2) if dt is not None and wt is not None else None,
+            "status": status,
+        })
+
+    return pd.DataFrame(records)
 
 
 def get_fund_flow_summary(fund_flows: pd.DataFrame) -> dict:

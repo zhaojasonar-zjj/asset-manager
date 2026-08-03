@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 
 from core.database import Database
-from core.parsers import parse_excel_file, detect_format, read_excel_robust
+from core.parsers import parse_excel_file, detect_format, read_excel_robust, summarize_weekly_assets
 from core.portfolio import recalculate_holdings, build_asset_history
 
 st.set_page_config(page_title="数据上传", page_icon="📁", layout="wide")
@@ -76,7 +76,7 @@ with col_file:
         "选择 Excel 文件",
         type=["xlsx", "xls"],
         accept_multiple_files=True,
-        help="支持国泰君安交割单、华泰证券交割单/资金明细单",
+        help="支持国泰君安交割单、华泰证券交割单/资金明细单/每周资产",
     )
 
 if uploaded_files and selected_account_id:
@@ -144,6 +144,13 @@ if uploaded_files and selected_account_id:
                     db.insert_fund_flows(data, account_id)
                     db.log_upload(account_id, fname, "资金明细", len(data))
                     st.success(f"✅ {fname}：{len(data)} 条资金流水已导入")
+
+                elif fmt == "huatai_weekly_assets":
+                    # 汇总为每周快照
+                    weekly_summary = summarize_weekly_assets(data)
+                    db.insert_weekly_assets(weekly_summary, account_id)
+                    db.log_upload(account_id, fname, "每周资产", len(weekly_summary))
+                    st.success(f"✅ {fname}：{len(weekly_summary)} 周资产快照已导入")
 
             # 导入完成后自动构建历史资产快照
             with st.spinner("正在构建历史资产曲线（获取历史行情，可能需要数十秒）..."):
