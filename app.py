@@ -50,6 +50,8 @@ st.markdown("### 📂 账户概览")
 total_assets_all = 0
 total_cash_all = 0
 total_mv_all = 0
+total_stock_all = 0
+total_cash_like_all = 0
 total_pnl_all = 0
 total_deposits_all = 0
 
@@ -60,16 +62,22 @@ for acc in accounts:
     deposits = db.get_total_deposits(account_id)
 
     if not holdings.empty:
-        codes = holdings["stock_code"].unique().tolist()
-        prices = fetch_realtime_prices(codes)
-        mv, pnl, _, _ = calculate_market_value(holdings, prices)
+        # 确保 asset_type 列存在（防御性）
+        if "asset_type" not in holdings.columns:
+            holdings["asset_type"] = "stock"
+        # 只拉股票行情，cash_like 不拉
+        stock_codes = holdings[holdings["asset_type"] != "cash_like"]["stock_code"].unique().tolist()
+        prices = fetch_realtime_prices(stock_codes) if stock_codes else {}
+        stock_val, cash_like_val, mv, pnl, _, _ = calculate_market_value(holdings, prices)
     else:
-        mv, pnl = 0, 0
+        stock_val, cash_like_val, mv, pnl = 0, 0, 0, 0
 
     total_assets = cash + mv
     total_assets_all += total_assets
     total_cash_all += cash
     total_mv_all += mv
+    total_stock_all += stock_val
+    total_cash_like_all += cash_like_val
     total_pnl_all += pnl
     total_deposits_all += deposits
 
@@ -77,11 +85,12 @@ for acc in accounts:
     ff_count = db.get_fund_flow_count(account_id)
 
     with st.expander(f"**{acc['name']}** ({acc['broker']}) — 总资产 ¥ {total_assets:,.2f}", expanded=True):
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("总资产", f"¥ {total_assets:,.2f}")
         col2.metric("现金余额", f"¥ {cash:,.2f}")
-        col3.metric("持仓市值", f"¥ {mv:,.2f}")
-        col4.metric("累计盈亏", f"¥ {pnl:,.2f}")
+        col3.metric("股票市值", f"¥ {stock_val:,.2f}")
+        col4.metric("类现金", f"¥ {cash_like_val:,.2f}")
+        col5.metric("累计盈亏", f"¥ {pnl:,.2f}")
 
         col_a, col_b, col_c = st.columns(3)
         col_a.metric("累计净转入", f"¥ {deposits:,.2f}")
@@ -92,11 +101,12 @@ for acc in accounts:
 st.markdown("---")
 st.markdown("### 📊 全部账户汇总")
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("总资产", f"¥ {total_assets_all:,.2f}")
 col2.metric("总现金", f"¥ {total_cash_all:,.2f}")
-col3.metric("总市值", f"¥ {total_mv_all:,.2f}")
-col4.metric("总盈亏", f"¥ {total_pnl_all:,.2f}")
+col3.metric("总股票市值", f"¥ {total_stock_all:,.2f}")
+col4.metric("总类现金", f"¥ {total_cash_like_all:,.2f}")
+col5.metric("总盈亏", f"¥ {total_pnl_all:,.2f}")
 
 if total_deposits_all > 0:
     net_value = total_assets_all / total_deposits_all
