@@ -401,6 +401,9 @@ def parse_huatai_weekly_assets(df: pd.DataFrame) -> pd.DataFrame:
 def summarize_weekly_assets(weekly_df: pd.DataFrame) -> pd.DataFrame:
     """将每周资产明细汇总为每日快照
 
+    银证转入/转出是本金变动，不计入总资产。
+    总资产 = 小计行（优先）或 股票+类现金+现金 加总。
+
     返回: [{date, stock_value, cash_like_value, cash_balance, total_assets}]
     """
     if weekly_df.empty:
@@ -412,14 +415,14 @@ def summarize_weekly_assets(weekly_df: pd.DataFrame) -> pd.DataFrame:
         cash_like_value = group.loc[group["row_type"] == "cash_like", "market_value"].sum()
         cash_balance = group.loc[group["row_type"] == "cash", "market_value"].sum()
         subtotal = group.loc[group["row_type"] == "subtotal", "market_value"].sum()
-        bank_transfer = group.loc[group["row_type"] == "bank_transfer", "market_value"].sum()
 
         if subtotal == 0:
-            # 没有小计行（如首日只有银证转入），用成分加总
+            # 没有小计行，用成分加总（不含银证转入）
             subtotal = stock_value + cash_like_value + cash_balance
-            if subtotal == 0 and bank_transfer > 0:
-                # 首日只有银证转入，总资产 = 转入金额
-                subtotal = bank_transfer
+
+        # subtotal=0 且无持仓的日期（仅有银证转入），不生成快照
+        if subtotal == 0 and stock_value == 0 and cash_like_value == 0 and cash_balance == 0:
+            continue
 
         records.append({
             "date": date,
@@ -430,6 +433,34 @@ def summarize_weekly_assets(weekly_df: pd.DataFrame) -> pd.DataFrame:
         })
 
     return pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+
+
+def extract_weekly_bank_transfers(weekly_df: pd.DataFrame) -> pd.DataFrame:
+    """从每周资产明细中提取银证转入/转出记录
+
+    返回: [{date, direction, amount}]
+          direction: '转入' / '转出'
+    """
+    if weekly_df.empty:
+        return pd.DataFrame()
+
+    bt_rows = weekly_df[weekly_df["row_type"] == "bank_transfer"].copy()
+    if bt_rows.empty:
+        return pd.DataFrame()
+
+    records = []
+    for _, row in bt_rows.iterrows():
+        mv = float(row.get("market_value", 0) or 0)
+        if mv == 0:
+            continue
+        direction = "转入" if mv > 0 else "转出"
+        records.append({
+            "date": str(row["date"]),
+            "direction": direction,
+            "amount": round(abs(mv), 2),
+        })
+
+    return pd.DataFrame(records)
 
 
 # ── 自动识别 & 路由 ────────────────────────────────────────

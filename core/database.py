@@ -120,6 +120,17 @@ CREATE TABLE IF NOT EXISTS weekly_holdings (
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 
+CREATE TABLE IF NOT EXISTS bank_transfers (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER NOT NULL,
+    transfer_date   TEXT NOT NULL,
+    direction       TEXT NOT NULL,
+    amount          REAL NOT NULL,
+    created_at      TEXT DEFAULT (datetime('now', 'localtime')),
+    UNIQUE(account_id, transfer_date, direction, amount),
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tx_acc   ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_tx_date  ON transactions(trade_date);
 CREATE INDEX IF NOT EXISTS idx_tx_code  ON transactions(stock_code);
@@ -551,6 +562,43 @@ class Database:
             except sqlite3.OperationalError:
                 return pd.DataFrame()
 
+    def insert_bank_transfers(self, df: pd.DataFrame, account_id: int):
+        """插入银证转入/转出记录（INSERT OR IGNORE 去重）"""
+        with self.get_connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS bank_transfers (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id      INTEGER NOT NULL,
+                    transfer_date   TEXT NOT NULL,
+                    direction       TEXT NOT NULL,
+                    amount          REAL NOT NULL,
+                    created_at      TEXT DEFAULT (datetime('now', 'localtime')),
+                    UNIQUE(account_id, transfer_date, direction, amount)
+                )
+            """)
+            for _, row in df.iterrows():
+                conn.execute(
+                    """INSERT OR IGNORE INTO bank_transfers
+                       (account_id, transfer_date, direction, amount)
+                       VALUES (?,?,?,?)""",
+                    (
+                        account_id,
+                        str(row.get("date", "")),
+                        str(row.get("direction", "")),
+                        float(row.get("amount", 0) or 0),
+                    ),
+                )
+
+    def get_bank_transfers(self, account_id: int) -> pd.DataFrame:
+        with self.get_connection() as conn:
+            try:
+                return pd.read_sql_query(
+                    "SELECT * FROM bank_transfers WHERE account_id = ? ORDER BY transfer_date ASC",
+                    conn, params=[account_id],
+                )
+            except sqlite3.OperationalError:
+                return pd.DataFrame()
+
     # ── 上传记录 ──────────────────────────────────────────
 
     def log_upload(self, account_id: int, filename, file_type, record_count, status="success", message=""):
@@ -626,10 +674,30 @@ class Database:
     def get_total_deposits(self, account_id: int) -> float:
         """累计净转入资金（银行转入 - 银行转出）
 
-        优先从资金流水表查；无资金流水时从交割单 BANK 记录推算。
+        数据来源优先级：
+        1. bank_transfers 表（每周资产中的银证转入/转出）
+        2. 资金流水表（华泰资金明细）
+        3. 交割单 BANK 记录（国泰君安）
         """
         with self.get_connection() as conn:
-            # 先查资金流水表
+            # 1. bank_transfers 表
+            try:
+                rows = conn.execute(
+                    "SELECT direction, amount FROM bank_transfers WHERE account_id = ?",
+                    (account_id,),
+                ).fetchall()
+                if rows:
+                    total = 0
+                    for r in rows:
+                        if r["direction"] == "转入":
+                            total += r["amount"]
+                        else:
+                            total -= r["amount"]
+                    return total
+            except sqlite3.OperationalError:
+                pass
+
+            # 2. 资金流水表
             row = conn.execute(
                 """SELECT COALESCE(SUM(amount), 0) AS v FROM fund_flows
                    WHERE account_id = ?
@@ -646,7 +714,7 @@ class Database:
             if row and row["v"] != 0:
                 return row["v"]
 
-            # 无资金流水，从交割单 BANK 记录推算
+            # 3. 交割单 BANK 记录
             row = conn.execute(
                 """SELECT COALESCE(SUM(settlement), 0) AS v FROM transactions
                    WHERE account_id = ? AND stock_code = 'BANK'""",
@@ -677,6 +745,7 @@ class Database:
             conn.execute("DELETE FROM daily_assets WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM weekly_assets WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM weekly_holdings WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM bank_transfers WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM upload_log   WHERE account_id = ?", (account_id,))
 
     def clear_all_data(self):
@@ -688,5 +757,6 @@ class Database:
             conn.execute("DELETE FROM daily_assets")
             conn.execute("DELETE FROM weekly_assets")
             conn.execute("DELETE FROM weekly_holdings")
+            conn.execute("DELETE FROM bank_transfers")
             conn.execute("DELETE FROM upload_log")
             conn.execute("DELETE FROM accounts")

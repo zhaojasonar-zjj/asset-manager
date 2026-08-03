@@ -11,6 +11,7 @@ from core.parsers import (
     detect_format,
     read_excel_robust,
     summarize_weekly_assets,
+    extract_weekly_bank_transfers,
 )
 from core.portfolio import recalculate_holdings, build_asset_history
 
@@ -154,11 +155,15 @@ if uploaded_files and selected_account_id:
                     # 存储每周持仓明细（仅 stock 和 cash_like 行）
                     detail = data[data["row_type"].isin(["stock", "cash_like"])].copy()
                     db.insert_weekly_holdings(detail, account_id)
-                    # 汇总为每周快照
+                    # 汇总为每周快照（不含银证转入）
                     weekly_summary = summarize_weekly_assets(data)
                     db.insert_weekly_assets(weekly_summary, account_id)
+                    # 提取银证转入/转出为本金变动记录
+                    bank_transfers = extract_weekly_bank_transfers(data)
+                    if not bank_transfers.empty:
+                        db.insert_bank_transfers(bank_transfers, account_id)
                     db.log_upload(account_id, fname, "每周资产", len(weekly_summary))
-                    st.success(f"✅ {fname}：{len(weekly_summary)} 周资产快照、{len(detail)} 条持仓明细已导入")
+                    st.success(f"✅ {fname}：{len(weekly_summary)} 周快照、{len(detail)} 条持仓明细、{len(bank_transfers)} 条本金变动已导入")
 
             # 导入完成后自动构建历史资产快照
             with st.spinner("正在构建历史资产曲线（获取历史行情，可能需要数十秒）..."):

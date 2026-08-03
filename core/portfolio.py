@@ -673,12 +673,34 @@ def get_capital_changes(db: Database, account_id: int) -> pd.DataFrame:
     """获取银行↔证券 资金变动记录
 
     数据来源：
+    - 每周资产中的银证转入/转出（bank_transfers 表）
     - 华泰资金明细：flow_type 含 "银行转存"（转入）/"银行转取"（转出）
     - 国泰君安交割单：stock_code="BANK"，stock_name 含 "证券转银行"/"银行转证券"
 
     返回: DataFrame[date, type, direction, amount, balance_after, description]
     """
     records = []
+    seen = set()  # 去重：(date, direction, amount)
+
+    # ── 从 bank_transfers 表提取（每周资产中的银证转入/转出）──
+    bank_transfers = db.get_bank_transfers(account_id)
+    if not bank_transfers.empty:
+        for _, row in bank_transfers.iterrows():
+            direction = str(row["direction"])
+            amount = float(row["amount"])
+            key = (str(row["transfer_date"]), direction, amount)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append({
+                "date": str(row["transfer_date"]),
+                "type": "银证转入" if direction == "转入" else "银证转出",
+                "direction": direction,
+                "amount": round(amount, 2),
+                "balance_after": 0.0,
+                "bank": "",
+                "description": "每周资产记录",
+            })
 
     # ── 从资金流水提取 ──
     fund_flows = db.get_fund_flows(account_id)
@@ -688,7 +710,11 @@ def get_capital_changes(db: Database, account_id: int) -> pd.DataFrame:
         for _, row in bank_ff.iterrows():
             amount = float(row["amount"])
             direction = "转入" if amount > 0 else "转出"
-            # 提取银行名称，如 "银行转存[招行存管]" → "招行存管"
+            key = (str(row["flow_date"]), direction, abs(amount))
+            if key in seen:
+                continue
+            seen.add(key)
+            # 提取银行名称
             flow_type = str(row["flow_type"])
             bank_name = ""
             if "[" in flow_type and "]" in flow_type:
@@ -710,13 +736,18 @@ def get_capital_changes(db: Database, account_id: int) -> pd.DataFrame:
         for _, row in bank_tx.iterrows():
             settlement = float(row["settlement"])
             direction = "转入" if settlement > 0 else "转出"
+            amount = abs(settlement)
             name = str(row.get("stock_name", ""))
+            key = (str(row["trade_date"]), direction, amount)
+            if key in seen:
+                continue
+            seen.add(key)
             records.append({
                 "date": str(row["trade_date"]),
                 "type": name,
                 "direction": direction,
-                "amount": round(abs(settlement), 2),
-                "balance_after": 0.0,  # 国泰君安交割单中没有余额字段
+                "amount": round(amount, 2),
+                "balance_after": float(row.get("fund_balance", 0) or 0),
                 "bank": "",
                 "description": name,
             })
