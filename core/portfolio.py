@@ -85,6 +85,9 @@ def calculate_market_value(holdings: pd.DataFrame, prices: dict) -> tuple[float,
         return 0.0, 0.0, 0.0, 0.0, holdings, True
 
     enriched = holdings.copy()
+    # 确保 asset_type 列存在
+    if "asset_type" not in enriched.columns:
+        enriched["asset_type"] = "stock"
     enriched["latest_price"] = 0.0
     enriched["market_value"] = 0.0
     enriched["pnl"] = 0.0
@@ -93,7 +96,7 @@ def calculate_market_value(holdings: pd.DataFrame, prices: dict) -> tuple[float,
     prices_ok = True
     for idx, row in enriched.iterrows():
         code = str(row["stock_code"]).strip().zfill(6)
-        asset_type = row.get("asset_type", "stock")
+        asset_type = row["asset_type"]
 
         if asset_type == "cash_like":
             # 类现金：不拉行情，用成本价（货币基金 NAV≈1.0，逆回购面值）
@@ -118,8 +121,8 @@ def calculate_market_value(holdings: pd.DataFrame, prices: dict) -> tuple[float,
         enriched.at[idx, "pnl"] = mv - cost
         enriched.at[idx, "pnl_pct"] = ((mv - cost) / cost * 100) if cost > 0 else 0.0
 
-    stock_value = enriched[enriched.get("asset_type", "stock") != "cash_like"]["market_value"].sum()
-    cash_like_value = enriched[enriched.get("asset_type", "stock") == "cash_like"]["market_value"].sum()
+    stock_value = enriched[enriched["asset_type"] != "cash_like"]["market_value"].sum()
+    cash_like_value = enriched[enriched["asset_type"] == "cash_like"]["market_value"].sum()
     total_market_value = enriched["market_value"].sum()
     total_pnl = enriched["pnl"].sum()
 
@@ -132,8 +135,11 @@ def take_daily_snapshot(db: Database, account_id: int):
     cash = db.get_cash_balance(account_id)
 
     if not holdings.empty:
+        # 确保 asset_type 列存在
+        if "asset_type" not in holdings.columns:
+            holdings["asset_type"] = "stock"
         # 只拉股票行情，cash_like 不拉
-        stock_codes = holdings[holdings.get("asset_type", "stock") != "cash_like"]["stock_code"].unique().tolist()
+        stock_codes = holdings[holdings["asset_type"] != "cash_like"]["stock_code"].unique().tolist()
         prices = fetch_realtime_prices(stock_codes) if stock_codes else {}
         stock_value, cash_like_value, market_value, _, _, _ = calculate_market_value(holdings, prices)
     else:

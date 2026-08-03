@@ -151,29 +151,26 @@ class Database:
             conn.executescript(SCHEMA_SQL)
 
         # ── asset_type 列迁移（增量，不删数据）──
+        # 用 get_connection 确保与 WAL 模式一致
         needs_asset_type_migration = False
-        probe2 = sqlite3.connect(str(self.db_path))
-        probe2.row_factory = sqlite3.Row
-        for table in ("transactions", "holdings"):
+        with self.get_connection() as conn:
+            for table in ("transactions", "holdings"):
+                try:
+                    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+                    if cols and not any(c["name"] == "asset_type" for c in cols):
+                        needs_asset_type_migration = True
+                        break
+                except sqlite3.OperationalError:
+                    pass
             try:
-                cols = probe2.execute(f"PRAGMA table_info({table})").fetchall()
-                if cols and not any(c["name"] == "asset_type" for c in cols):
+                da_cols = conn.execute("PRAGMA table_info(daily_assets)").fetchall()
+                if da_cols and not any(c["name"] == "cash_like_value" for c in da_cols):
                     needs_asset_type_migration = True
-                    break
             except sqlite3.OperationalError:
                 pass
-        # daily_assets 也需要 cash_like_value 列
-        try:
-            da_cols = probe2.execute("PRAGMA table_info(daily_assets)").fetchall()
-            if da_cols and not any(c["name"] == "cash_like_value" for c in da_cols):
-                needs_asset_type_migration = True
-        except sqlite3.OperationalError:
-            pass
-        probe2.close()
 
         if needs_asset_type_migration:
             with self.get_connection() as conn:
-                # SQLite ALTER TABLE ADD COLUMN 是安全的增量操作
                 for table in ("transactions", "holdings"):
                     try:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN asset_type TEXT DEFAULT 'stock'")
@@ -303,7 +300,10 @@ class Database:
             params.append(end_date)
         sql += " ORDER BY trade_date ASC, id ASC"
         with self.get_connection() as conn:
-            return pd.read_sql_query(sql, conn, params=params)
+            df = pd.read_sql_query(sql, conn, params=params)
+        if "asset_type" not in df.columns:
+            df["asset_type"] = "stock"
+        return df
 
     # ── 资金流水 ──────────────────────────────────────────
 
@@ -344,10 +344,14 @@ class Database:
 
     def get_holdings(self, account_id: int) -> pd.DataFrame:
         with self.get_connection() as conn:
-            return pd.read_sql_query(
+            df = pd.read_sql_query(
                 "SELECT * FROM holdings WHERE account_id = ? AND quantity > 0 ORDER BY stock_code",
                 conn, params=[account_id],
             )
+        # 确保 asset_type 列存在（防御性，应对迁移边界情况）
+        if "asset_type" not in df.columns:
+            df["asset_type"] = "stock"
+        return df
 
     def replace_holdings(self, account_id: int, holdings_list: list[dict]):
         with self.get_connection() as conn:

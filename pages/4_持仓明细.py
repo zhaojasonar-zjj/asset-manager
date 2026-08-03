@@ -33,7 +33,10 @@ if holdings.empty:
     st.stop()
 
 # ── 实时行情（只拉股票，不拉类现金）──────────────────────
-stock_codes = holdings[holdings.get("asset_type", "stock") != "cash_like"]["stock_code"].unique().tolist()
+# 确保 asset_type 列存在（防御性）
+if "asset_type" not in holdings.columns:
+    holdings["asset_type"] = "stock"
+stock_codes = holdings[holdings["asset_type"] != "cash_like"]["stock_code"].unique().tolist()
 prices = {}
 if stock_codes:
     with st.spinner("正在获取实时行情..."):
