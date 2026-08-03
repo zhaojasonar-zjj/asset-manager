@@ -166,12 +166,17 @@ def fetch_history_kline(
     start_date: str = "",
     end_date: str = "",
     count: int = 365,
-    fq: str = "qfq",
+    fq: str = "",
 ) -> list[dict]:
     """获取历史日K线数据
 
     腾讯 API 单次最多返回约 640 条。如果日期跨度超过 640 个交易日（约 2.5 年），
     自动分段拉取并拼接。
+
+    fq 参数：
+    - "" (默认) = 不复权，与券商周报收盘价一致
+    - "qfq" = 前复权
+    - "hfq" = 后复权
 
     返回: [{"date": "YYYY-MM-DD", "open": float, "close": float, "high": float, "low": float, "volume": float}]
     """
@@ -196,7 +201,8 @@ def fetch_history_kline(
         if isinstance(stock_data, dict):
             stock_data = stock_data.get(tencent_code, stock_data)
         if isinstance(stock_data, dict):
-            kline = stock_data.get("qfqday") or stock_data.get("day") or []
+            # 不复权时数据在 "day" 键下；前复权在 "qfqday"，后复权在 "hfqday"
+            kline = stock_data.get("day") or stock_data.get("qfqday") or stock_data.get("hfqday") or []
         else:
             kline = []
 
