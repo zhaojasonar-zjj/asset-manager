@@ -329,12 +329,15 @@ class Database:
     def delete_account(self, account_id: int):
         """删除账户及其所有关联数据"""
         with self.get_connection() as conn:
-            conn.execute("DELETE FROM transactions WHERE account_id = ?", (account_id,))
-            conn.execute("DELETE FROM fund_flows   WHERE account_id = ?", (account_id,))
-            conn.execute("DELETE FROM holdings     WHERE account_id = ?", (account_id,))
-            conn.execute("DELETE FROM daily_assets WHERE account_id = ?", (account_id,))
-            conn.execute("DELETE FROM upload_log   WHERE account_id = ?", (account_id,))
-            conn.execute("DELETE FROM accounts     WHERE id = ?", (account_id,))
+            conn.execute("DELETE FROM transactions   WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM fund_flows     WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM holdings       WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM daily_assets   WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM weekly_assets  WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM weekly_holdings WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM bank_transfers  WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM upload_log     WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM accounts       WHERE id = ?", (account_id,))
 
     # ── 交割单 ────────────────────────────────────────────
 
