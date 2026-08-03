@@ -214,10 +214,13 @@ class Database:
                 )
 
             # 重建所有账户持仓（trade_type 变了，持仓需要重算）
-            from core.portfolio import recalculate_holdings
+            # 延迟导入避免循环依赖
+            import importlib
+            portfolio_mod = importlib.import_module("core.portfolio")
+            recalc = getattr(portfolio_mod, "recalculate_holdings")
             for acc in self.get_all_accounts():
                 tx_df = self.get_transactions(acc["id"])
-                holdings_list = recalculate_holdings(tx_df)
+                holdings_list = recalc(tx_df)
                 self.replace_holdings(acc["id"], holdings_list)
 
             # 清除历史快照（市值拆分变了，需要重建）

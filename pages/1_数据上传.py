@@ -6,7 +6,12 @@ from pathlib import Path
 import shutil
 
 from core.database import Database
-from core.parsers import parse_excel_file, detect_format, read_excel_robust, summarize_weekly_assets
+from core.parsers import (
+    parse_excel_file,
+    detect_format,
+    read_excel_robust,
+    summarize_weekly_assets,
+)
 from core.portfolio import recalculate_holdings, build_asset_history
 
 st.set_page_config(page_title="数据上传", page_icon="📁", layout="wide")
